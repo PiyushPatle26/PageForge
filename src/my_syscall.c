@@ -1,10 +1,10 @@
 /*
- * my_syscall.c — the ONLY file that talks to the Linux kernel.
+ * my_syscall.c: the only file that talks to the Linux kernel.
  *
- * We use three syscalls:
- *   mmap()   — get raw anonymous memory pages from the OS
- *   write()  — output characters to stdout
- *   exit()   — terminate
+ * Three syscalls, that is the whole list:
+ *   mmap()   get raw anonymous pages from the OS
+ *   write()  put characters on stdout
+ *   exit()   stop
  *
  * We include the minimal POSIX headers just for these syscall numbers and
  * flag constants. Nothing else from libc is used anywhere in the project.
@@ -17,11 +17,11 @@
 #include <unistd.h>     /* write(), _exit() */
 
 /*
- * my_mmap — ask the OS for 'size' bytes of anonymous, zeroed memory.
+ * my_mmap: ask the OS for 'size' bytes of anonymous, zeroed memory.
  *
- * This is how the kernel's page allocator itself gets its initial memory
- * from the hardware (via the boot memory map). In user-space we use mmap()
- * to simulate that "here is raw RAM" handoff.
+ * The kernel's own page allocator gets its initial memory from the boot
+ * memory map. We are in user space, so mmap() stands in for that same
+ * "here is your RAM, do what you like with it" handoff.
  */
 void *my_mmap(size_t size)
 {
@@ -42,7 +42,7 @@ void *my_mmap(size_t size)
 }
 
 /*
- * my_munmap — return a region obtained via my_mmap back to the OS.
+ * my_munmap: give a region from my_mmap back to the OS.
  */
 void my_munmap(void *addr, size_t size)
 {
@@ -50,8 +50,8 @@ void my_munmap(void *addr, size_t size)
 }
 
 /*
- * my_write — write raw bytes to stdout (fd = 1).
- * This is the only output primitive. my_printf is built on top of this.
+ * my_write: raw bytes to stdout. This is the only output primitive we
+ * have, and my_printf is built on top of it.
  */
 void my_write(int fd, const void *buf, size_t len)
 {
@@ -60,7 +60,7 @@ void my_write(int fd, const void *buf, size_t len)
 }
 
 /*
- * my_exit — terminate the process.
+ * my_exit: stop the process.
  */
 void my_exit(int code)
 {
