@@ -1,23 +1,33 @@
 /*
- * my_slab.c — slab allocator built on top of the buddy page allocator.
+ * my_slab.c: slab allocator, built on top of the buddy page allocator.
  *
- * Linux equivalent: mm/slab.c (SLAB) or mm/slub.c (SLUB).
+ * Linux equivalent: mm/slub.c. Linux used to ship three of these, SLAB,
+ * SLUB and SLOB. SLOB was removed in 6.4 and SLAB in 6.8, so SLUB is the
+ * only one left and mm/slab.c no longer exists.
  *
  * How it works:
  *   Each size class (8, 16, 32 … 1024 bytes) has a "cache".
  *   A cache holds multiple "slabs".  A slab is exactly one 4 KB page.
  *   Within a slab, objects are stored back-to-back, and a free-list
  *   links all the unallocated ones using the objects' own memory
- *   (an embedded linked list — no extra bookkeeping memory needed).
+ *   (a linked list living inside the objects, so no extra bookkeeping).
  *
  *   Slab states:
- *     partial — has both used and free objects (allocate from here first)
- *     full    — no free objects left
- *     empty   — all objects are free (can be returned to buddy)
+ *     partial: some objects used, some free, so allocate from here first
+ *     full:    nothing free left
+ *     empty:   everything free, so it can go back to the buddy allocator
  *
  *   Finding which slab an object belongs to:
  *     Every slab header lives at the start of its page.
  *     So: slab = ptr & ~0xFFF  (mask off the lower 12 bits)
+ *
+ * Where this sits: layer 3, between my_buddy.c below and my_alloc.c above.
+ * It exists because buddy only deals in whole 4 KB pages, and most things
+ * a kernel allocates are far smaller than that.
+ *
+ * If you read one thing here, look at how a free object stores the pointer
+ * to the next free object inside itself. That trick is why the free list
+ * costs no extra memory at all.
  */
 
 #include "my_slab.h"
@@ -158,7 +168,7 @@ void my_slab_free(void *ptr)
     my_slab_t *slab      = (my_slab_t *)page_base;
 
     if (slab->magic != SLAB_MAGIC)
-        my_panic("my_slab_free: bad magic — double free or corrupt pointer");
+        my_panic("my_slab_free: bad magic, double free or corrupt pointer");
 
     /* Find the cache for this object size */
     my_kmem_cache_t *cache = NULL;

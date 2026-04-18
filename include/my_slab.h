@@ -2,9 +2,10 @@
 #define MY_SLAB_H
 
 /*
- * my_slab.h — slab allocator, built on top of the buddy allocator.
+ * my_slab.h: slab allocator, sitting on top of the buddy allocator.
  *
- * This mirrors Linux's SLAB/SLUB subsystem (the layer above pages).
+ * This mirrors Linux's slab layer, which sits directly above the page
+ * allocator. In current kernels that means SLUB, in mm/slub.c.
  *
  * Why slabs?
  *   The buddy allocator works in whole pages (4 KB minimum).
