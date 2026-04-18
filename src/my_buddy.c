@@ -1,23 +1,34 @@
 /*
- * my_buddy.c — buddy system page allocator.
+ * my_buddy.c: the buddy system page allocator.
  *
  * This is the lowest layer of memory management, exactly mirroring
  * the Linux kernel's zone page allocator (mm/page_alloc.c).
  *
+ * Linux calls the largest order MAX_PAGE_ORDER, which is 10, the same as
+ * ours. Note the name: it was plain MAX_ORDER until 6.5, when the meaning
+ * of the constant changed and it was renamed to avoid silent breakage.
+ *
  * Key concepts implemented:
- *   1. Free lists  — one linked list of free blocks per order
- *   2. Splitting   — when no block of order N is free, split an order N+1 block
- *   3. Coalescing  — when freeing, merge with the buddy if it is also free
- *   4. Bitmap      — one bit per page tracks which pages are allocated
+ *   1. Free lists, one linked list of free blocks per order
+ *   2. Splitting, when no order N block is free, cut an order N+1 block in two
+ *   3. Coalescing, when freeing, merge back with the buddy if it is free too
+ *   4. Bitmap, one bit per page saying whether it is allocated
  *
  * buddy formula: given a block starting at page index P with order N,
  *   its buddy's page index = P XOR (1 << N)
+ *
+ * Where this sits: layer 2. It takes one big chunk from my_syscall.c and
+ * hands out pages to my_slab.c and my_alloc.c above it.
+ *
+ * If you read one function here, read my_free_pages(). The merging loop at
+ * the bottom of it is the whole buddy idea in about ten lines.
  */
 
 #include "my_buddy.h"
 #include "my_io.h"
 
-/* The one global buddy allocator (like Linux's mem_map) */
+/* The one global buddy allocator. Linux keeps this state per zone, in
+ * struct zone's free_area[NR_PAGE_ORDERS] (include/linux/mmzone.h). */
 my_buddy_t g_buddy;
 
 /* ------------------------------------------------------------------ */
@@ -57,8 +68,14 @@ static void *page_to_addr(uint32_t page_idx)
 /* Free list helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-/* Remove a specific block from the free list at 'order' */
-static void freelist_remove(uint32_t page_idx, uint32_t order)
+/*
+ * Take a block off the free list at 'order'.
+ *
+ * Returns 1 if the block was there and has been removed, 0 if it was not
+ * on the list at all. That return value is also how we ask "is this block
+ * free?", which saves walking the list twice to ask and then remove.
+ */
+static int freelist_remove(uint32_t page_idx, uint32_t order)
 {
     void *target = page_to_addr(page_idx);
     my_free_block_t **cur = &g_buddy.free_list[order];
@@ -66,21 +83,9 @@ static void freelist_remove(uint32_t page_idx, uint32_t order)
     while (*cur) {
         if ((void *)*cur == target) {
             *cur = (*cur)->next;
-            return;
+            return 1;
         }
         cur = &(*cur)->next;
-    }
-}
-
-/* Check if a block is in the free list at 'order' */
-static int freelist_contains(uint32_t page_idx, uint32_t order)
-{
-    void *target = page_to_addr(page_idx);
-    my_free_block_t *cur = g_buddy.free_list[order];
-
-    while (cur) {
-        if ((void *)cur == target) return 1;
-        cur = cur->next;
     }
     return 0;
 }
@@ -143,7 +148,7 @@ void my_buddy_init(void *base, size_t size)
 }
 
 /*
- * my_alloc_pages — allocate 2^order contiguous pages.
+ * my_alloc_pages: allocate 2^order pages in a row.
  *
  * Algorithm:
  *   1. Look for a free block at 'order'.
@@ -196,7 +201,7 @@ void *my_alloc_pages(uint32_t order)
 }
 
 /*
- * my_free_pages — release a block back to the buddy allocator.
+ * my_free_pages: give a block back to the buddy allocator.
  *
  * Algorithm:
  *   1. Mark pages as free.
@@ -221,20 +226,25 @@ void my_free_pages(void *ptr, uint32_t order)
 
     g_buddy.free_pages += count;
 
-    /* Coalesce with buddy while possible */
+    /*
+     * Merge with the buddy for as long as the buddy is also free.
+     *
+     * The buddy of a block is found by flipping one bit of its page index,
+     * which is what makes this cheap. If freelist_remove() succeeds then
+     * the buddy was free and is now ours, so the two halves become one
+     * block at the next order up and we go round again.
+     */
     while (order < MAX_ORDER) {
         uint32_t buddy_idx = page_idx ^ (1u << order);
 
-        /* Buddy must be within arena and not allocated */
         if (buddy_idx >= g_buddy.total_pages)
-            break;
+            break;                              /* buddy is off the end   */
         if (bitmap_test(buddy_idx))
-            break;
-        if (!freelist_contains(buddy_idx, order))
-            break;
+            break;                              /* buddy is in use        */
+        if (!freelist_remove(buddy_idx, order))
+            break;                              /* buddy is free, but was
+                                                   split into smaller bits */
 
-        /* Merge: remove buddy, step up one order */
-        freelist_remove(buddy_idx, order);
         if (buddy_idx < page_idx)
             page_idx = buddy_idx;   /* merged block starts at the lower index */
         order++;

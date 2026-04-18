@@ -2,7 +2,7 @@
 #define MY_BUDDY_H
 
 /*
- * my_buddy.h — buddy system page allocator.
+ * my_buddy.h: the buddy system page allocator.
  *
  * This is exactly how the Linux kernel's page allocator works.
  *
@@ -15,7 +15,8 @@
  *   order 2 → 4 pages (16 KB)
  *   ...up to MAX_ORDER
  *
- * Every block has a "buddy" — a block of the same size adjacent to it.
+ * Every block has a "buddy", which is the block of the same size sitting
+ * right next to it.
  * When you free a block, if its buddy is also free, they merge into a
  * bigger block (coalescing). This prevents fragmentation.
  *
