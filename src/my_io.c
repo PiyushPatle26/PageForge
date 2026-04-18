@@ -1,6 +1,13 @@
 /*
- * my_io.c — output functions built on my_write().
+ * my_io.c: printing, built on my_write().
  * No stdio.h, no printf from libc.
+ *
+ * This is a support file, not one of the memory layers. It exists because
+ * the project refuses to link libc, and debugging an allocator without any
+ * way to print things is miserable.
+ *
+ * my_printf() below handles %s %d %u %x %p %c, an 'l' for 64-bit values,
+ * and a field width on %s so columns line up. That is all it handles.
  */
 
 #include "my_io.h"
@@ -40,14 +47,14 @@ static void print_uint(unsigned long n, int base)
         buf[i++] = digits[n % (unsigned long)base];
         n /= (unsigned long)base;
     }
-    /* buf is reversed — print it backwards */
+    /* buf came out backwards, so print it in reverse */
     while (--i >= 0)
         my_putchar(buf[i]);
 }
 
 /* ------------------------------------------------------------------ */
 /* my_printf                                                            */
-/* Supports: %s %d %u %x %p %c %%                                      */
+/* Supports: %s %d %u %x %p %c %% plus a field width on %s            */
 /* ------------------------------------------------------------------ */
 void my_printf(const char *fmt, ...)
 {
@@ -62,26 +69,55 @@ void my_printf(const char *fmt, ...)
 
         fmt++;  /* skip the '%' */
 
+        /*
+         * Optional field width, so columns line up. Only %s uses it, and
+         * a leading '-' means pad on the right instead of the left.
+         */
+        int left_align = 0, width = 0;
+        if (*fmt == '-') { left_align = 1; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+
+        /*
+         * Length modifier. On rv64 a long is 64 bits and a pointer-sized
+         * address will not fit in an int, so %lx and %lu read an unsigned
+         * long instead. "ll" means the same thing here.
+         */
+        int is_long = 0;
+        while (*fmt == 'l') { is_long = 1; fmt++; }
+
         switch (*fmt) {
         case 's': {
             const char *s = __builtin_va_arg(args, const char *);
             if (!s) s = "(null)";
+
+            int len = 0;
+            while (s[len]) len++;
+            int pad = width > len ? width - len : 0;
+
+            if (!left_align)
+                while (pad-- > 0) my_putchar(' ');
             while (*s) my_putchar(*s++);
+            if (left_align)
+                while (pad-- > 0) my_putchar(' ');
             break;
         }
         case 'd': {
-            long n = __builtin_va_arg(args, int);
+            long n = is_long ? __builtin_va_arg(args, long)
+                             : (long)__builtin_va_arg(args, int);
             if (n < 0) { my_putchar('-'); n = -n; }
             print_uint((unsigned long)n, 10);
             break;
         }
         case 'u': {
-            unsigned long n = __builtin_va_arg(args, unsigned int);
+            unsigned long n = is_long ? __builtin_va_arg(args, unsigned long)
+                                      : (unsigned long)__builtin_va_arg(args, unsigned int);
             print_uint(n, 10);
             break;
         }
         case 'x': {
-            unsigned long n = __builtin_va_arg(args, unsigned int);
+            unsigned long n = is_long ? __builtin_va_arg(args, unsigned long)
+                                      : (unsigned long)__builtin_va_arg(args, unsigned int);
             print_uint(n, 16);
             break;
         }
@@ -110,7 +146,7 @@ void my_printf(const char *fmt, ...)
 }
 
 /* ------------------------------------------------------------------ */
-/* my_panic — print message and halt                                    */
+/* my_panic: print the message and stop                                 */
 /* ------------------------------------------------------------------ */
 void my_panic(const char *msg)
 {
