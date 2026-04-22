@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    name: Build, Test & QEMU
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc make valgrind \
+            qemu-user qemu-user-static
+
+      - name: Build main binary (static)
+        run: make clean && make
+
+      - name: Run Unity unit tests (32 tests)
+        run: make test
+
+      - name: Run standalone demo
+        run: make demo
+
+      - name: Run under QEMU user-mode
+        run: qemu-x86_64-static ./pageforge
+
+      - name: Valgrind memory check (demo)
+        run: valgrind --error-exitcode=1 --leak-check=full ./demo/pageforge_demo
