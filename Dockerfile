@@ -15,10 +15,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # The rv64 cross toolchain plus QEMU user-mode. Native gcc and valgrind stay
 # for the ARCH=host build, because valgrind has no riscv64 target.
+#
+# libc6-dev-riscv64-cross is listed on purpose. gcc-riscv64-linux-gnu only
+# Recommends it, and --no-install-recommends means we would not get it, so
+# the compiler would install without any target headers and the first
+# #include <sys/mman.h> would fail.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     gcc-riscv64-linux-gnu \
+    libc6-dev-riscv64-cross \
     make \
     valgrind \
     qemu-user \

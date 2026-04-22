@@ -18,9 +18,11 @@ jobs:
       - name: Install RISC-V toolchain and QEMU
         run: |
           sudo apt-get update
+          # libc6-dev-riscv64-cross is only Recommended by the compiler, and
+          # --no-install-recommends would skip it, leaving no target headers.
           sudo apt-get install -y --no-install-recommends \
-            build-essential gcc gcc-riscv64-linux-gnu make valgrind \
-            qemu-user qemu-user-static file
+            build-essential gcc gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            make valgrind qemu-user qemu-user-static file
 
       - name: Build main binary (riscv64, static)
         run: make clean && make
