@@ -223,7 +223,7 @@ The demo walks through all five layers with live addresses and pass markers:
 
 ## Documentation
 
-A detailed, 200-page write-up is included in [`MEMORY_MANAGEMENT.md`](MEMORY_MANAGEMENT.md) covering:
+A detailed, 200-page write-up is included in [`MEMORY_MANAGEMENT.md`](docs/MEMORY_MANAGEMENT.md) covering:
 
 - Why memory management is the hardest part of an OS kernel
 - Physical memory, zones (DMA / NORMAL / HIGHMEM), `struct page`
