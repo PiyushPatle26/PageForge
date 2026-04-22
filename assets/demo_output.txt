@@ -1,0 +1,53 @@
+[1;35m
+  ____                  _____
+ |  _ \ __ _  __ _  ___|  ___|__  _ __ __ _  ___
+ | |_) / _` |/ _` |/ _ \ |_ / _ \| '__/ _` |/ _ \
+ |  __/ (_| | (_| |  __/  _| (_) | | | (_| |  __/
+ |_|   \__,_|\__, |\___|_|  \___/|_|  \__, |\___|
+              |___/                     |___/
+[0m
+  Linux kernel MM stack, from scratch, no libc
+
+
+[1;36m=== Layer 1: Raw OS Memory  (mmap) ===[0m
+  my_mmap(16 KB)         → 0x2aaaab2ad000
+  write + read-back      → 0xde 0xad [1;32m✓[0m
+  my_munmap()            → pages returned to OS
+
+[1;36m=== Layer 2: Buddy Page Allocator ===[0m
+[buddy] init: base=0x2aaaab2b1000  pages=1024  free=1024
+  Arena : 0x2aaaab2b1000  (1024 pages = 4 MB)
+  [1;32m[OK][0m alloc order-0  (4 KB) → 0x2aaaab2b1000
+  [1;32m[OK][0m alloc order-1  (8 KB) → 0x2aaaab2b3000
+  [1;32m[OK][0m alloc order-3  (32 KB) → 0x2aaaab2b9000
+  Free pages after 3 allocs : 1013 / 1024
+  Free pages after all frees: 1024 / 1024  [1;32m(fully coalesced ✓)[0m
+
+[1;36m=== Layer 3: Slab Object Cache ===[0m
+[slab]  init: 8 size classes (8 .. 1024 bytes)
+[alloc] init: threshold=1024 B  (slab below, pages above)
+  [1;32m[OK][0m slab_alloc(8  B) → 0x2aaaab2b1020
+  [1;32m[OK][0m slab_alloc(16 B) → 0x2aaaab2b2020
+  [1;32m[OK][0m slab_alloc(64 B) → 0x2aaaab2b3040
+  [1;32m[OK][0m slab_alloc(256 B) → 0x2aaaab2b4100
+  All slab objects freed  [1;32m✓[0m
+
+[1;36m=== Layer 4: General Allocator  (kmalloc / calloc / realloc) ===[0m
+  [1;32m[OK][0m kmalloc(8)    → slab → 0x2aaaab2b5038
+  [1;32m[OK][0m kmalloc(100)  → slab → 0x2aaaab2b6098
+  [1;32m[OK][0m kmalloc(512)  → slab → 0x2aaaab2b7418
+  [1;32m[OK][0m kmalloc(4096) → buddy → 0x2aaaab2b9018
+  calloc(8 × 4 B)        → 0x2aaaab2b3058
+  arr[0..3] = 0 0 0 0  [1;32m(zeroed ✓)[0m
+  realloc → 64 B         → 0x2aaaab2b6118
+  data preserved         = 10 20 30 40  [1;32m✓[0m
+  All allocations freed   [1;32m✓[0m
+
+[1;36m=== Layer 0: Page Table Simulation (RISC-V Sv39) ===[0m
+  VA 0x00001ABC → PA 0x80100abc
+  VA 0x00002080 → PA 0x80200080
+  VA 0x40201004 → PA 0x80300004
+  VA 0x00005000 → PA 0x0  [1;31m(not mapped = page fault)[0m
+
+[1;32m  All layers working correctly. PageForge complete.[0m
+
