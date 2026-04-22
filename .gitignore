@@ -1,0 +1,26 @@
+# Build artifacts
+pageforge
+demo/pageforge_demo
+tests/run_tests
+
+# Object files
+*.o
+*.a
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docs build
+docs/html/
+docs/latex/
+
+# PDF (generated from Markdown)
+*.pdf
