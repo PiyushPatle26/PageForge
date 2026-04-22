@@ -1,5 +1,9 @@
 /*
- * demo.c — standalone demo for PageForge showing all allocator layers.
+ * demo.c: a standalone run through every allocator layer.
+ *
+ * Same idea as src/main.c but shorter and in colour. main.c explains each
+ * step as it goes, this one just exercises everything quickly and prints
+ * the results. Built as a separate binary by `make demo`.
  *
  * This demo is separate from the main.c so it can be run independently,
  * linked against the PageForge library sources.
@@ -35,10 +39,10 @@ int main(void)
     my_puts(" |_|   \\__,_|\\__, |\\___|_|  \\___/|_|  \\__, |\\___|");
     my_puts("              |___/                     |___/");
     my_puts("\033[0m");
-    my_puts("  Linux kernel MM stack — from scratch, no libc\n");
+    my_puts("  Linux kernel MM stack, from scratch, no libc\n");
 
     /* ---------------------------------------------------------------- */
-    separator("Layer 1 — Raw OS Memory  (mmap)");
+    separator("Layer 1: Raw OS Memory  (mmap)");
     void *raw = my_mmap(PAGE_SIZE * 4);
     my_printf("  my_mmap(16 KB)         → %p\n", raw);
     ((uint8_t *)raw)[0] = 0xDE;
@@ -49,7 +53,7 @@ int main(void)
     my_puts("  my_munmap()            → pages returned to OS");
 
     /* ---------------------------------------------------------------- */
-    separator("Layer 2 — Buddy Page Allocator");
+    separator("Layer 2: Buddy Page Allocator");
     void *arena = my_mmap(ARENA_SIZE);
     my_buddy_init(arena, ARENA_SIZE);
     my_printf("  Arena : %p  (%u pages = 4 MB)\n",
@@ -68,7 +72,7 @@ int main(void)
               g_buddy.free_pages, g_buddy.total_pages);
 
     /* ---------------------------------------------------------------- */
-    separator("Layer 3 — Slab Object Cache");
+    separator("Layer 3: Slab Object Cache");
     my_alloc_init();  /* re-init slab on same buddy */
 
     void *s8   = my_slab_alloc(8);    ok("slab_alloc(8  B)", s8);
@@ -81,7 +85,7 @@ int main(void)
     my_puts("  All slab objects freed  \033[1;32m✓\033[0m");
 
     /* ---------------------------------------------------------------- */
-    separator("Layer 4 — General Allocator  (kmalloc / calloc / realloc)");
+    separator("Layer 4: General Allocator  (kmalloc / calloc / realloc)");
 
     void *k8    = my_kmalloc(8);     ok("kmalloc(8)    → slab", k8);
     void *k100  = my_kmalloc(100);   ok("kmalloc(100)  → slab", k100);
@@ -107,17 +111,19 @@ int main(void)
     my_puts("  All allocations freed   \033[1;32m✓\033[0m");
 
     /* ---------------------------------------------------------------- */
-    separator("Layer 0 — Page Table Simulation");
+    separator("Layer 0: Page Table Simulation (RISC-V Sv39)");
     my_page_dir_t *pgd = my_pgd_create();
-    my_map_page(pgd, 0x00001000, 0x00100000, PTE_WRITE);
-    my_map_page(pgd, 0x00002000, 0x00200000, PTE_WRITE | PTE_USER);
-    my_map_page(pgd, 0x00401000, 0x00300000, PTE_WRITE);
+    my_map_page(pgd, 0x00001000, 0x80100000, PTE_R | PTE_X);
+    my_map_page(pgd, 0x00002000, 0x80200000, PTE_R | PTE_W | PTE_U);
+    my_map_page(pgd, 0x40201000, 0x80300000, PTE_R | PTE_W);
 
-    my_printf("  VA 0x00001ABC → PA 0x%x\n",
+    my_printf("  VA 0x00001ABC → PA 0x%lx\n",
               my_virt_to_phys(pgd, 0x00001ABC));
-    my_printf("  VA 0x00002080 → PA 0x%x\n",
+    my_printf("  VA 0x00002080 → PA 0x%lx\n",
               my_virt_to_phys(pgd, 0x00002080));
-    my_printf("  VA 0x00005000 → PA 0x%x  \033[1;31m(not mapped = page fault)\033[0m\n",
+    my_printf("  VA 0x40201004 → PA 0x%lx\n",
+              my_virt_to_phys(pgd, 0x40201004));
+    my_printf("  VA 0x00005000 → PA 0x%lx  \033[1;31m(not mapped = page fault)\033[0m\n",
               my_virt_to_phys(pgd, 0x00005000));
 
     /* ---------------------------------------------------------------- */
