@@ -1,20 +1,22 @@
 #!/bin/bash
-# run_qemu.sh — build PageForge and run it inside QEMU user-mode.
+# run_qemu.sh: cross-build PageForge for riscv64 and run it under QEMU.
 #
-# QEMU user-mode emulates just the CPU instruction set and forwards
-# Linux syscalls to the host kernel. It's the simplest way to run
-# a Linux binary on QEMU without needing a full OS image.
+# QEMU user-mode emulates the RISC-V instruction set and passes Linux
+# syscalls straight through to the host kernel. It is the easiest way to
+# run an rv64 binary on any machine without a full OS image.
 #
-# Install QEMU user-mode:
-#   sudo apt install qemu-user        (dynamic)
-#   sudo apt install qemu-user-static (static, works cross-arch)
+# Install the toolchain:
+#   sudo apt install gcc-riscv64-linux-gnu
+#   sudo apt install qemu-user qemu-user-static
 
 set -e
 
-echo "==> Building..."
+echo "==> Cross-building for riscv64..."
 make clean
 make
 
+file ./pageforge
+
 echo ""
-echo "==> Running in QEMU user-mode..."
-make qemu
+echo "==> Running under qemu-riscv64..."
+make run
