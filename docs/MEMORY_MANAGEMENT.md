@@ -1,35 +1,42 @@
-# Memory Management in Linux Kernel — A Complete Guide
+# Memory Management in Linux Kernel: A Complete Guide
 ### With PageForge: Building Linux MM From Scratch
 
-> **Reference:** Robert Love, *Linux Kernel Development*, 3rd Edition (Addison-Wesley, 2010)
-> Chapters 12 (Memory Management, p.231), 15 (Process Address Space, p.305)
+> **Sources:** the Linux source tree and the RISC-V privileged specification.
 >
-> **Project:** PageForge — a complete, beginner-friendly reimplementation of the Linux
-> kernel memory management stack in pure C, no libc, tested under QEMU.
+> Every kernel constant, struct and header path named below was checked
+> against the headers of the kernel this was written on, Linux 7.0
+> (`/usr/src/linux-headers-7.0.0-29-generic`), rather than quoted from memory.
+> Statements about *when* something was renamed or removed are history and
+> cannot be checked that way, so they are given as context.
+>
+> This matters because a lot of writing about Linux MM still uses names that
+> no longer exist, and code written against them will not build.
+>
+> **Project:** PageForge, a complete, beginner-friendly reimplementation of the Linux
+> kernel memory management stack in pure C, no libc, cross-compiled for **riscv64**
+> and tested under QEMU user-mode emulation. The paging layer models **Sv39**, the
+> three-level page-table format Linux boots with on rv64.
 
 ---
 
 ## Table of Contents
 
 1. [Why Memory Management Is Hard](#1-why-memory-management-is-hard)
-2. [The Big Picture — Four Layers](#2-the-big-picture--four-layers)
-3. [Physical Memory — Pages](#3-physical-memory--pages)
+2. [The Big Picture: Four Layers](#2-the-big-picture-four-layers)
+3. [Physical Memory: Pages](#3-physical-memory-pages)
 4. [Memory Zones](#4-memory-zones)
-5. [How Linux Gets Pages — The Page Allocator](#5-how-linux-gets-pages--the-page-allocator)
-6. [The Buddy System — How PageForge Implements It](#6-the-buddy-system--how-pageforge-implements-it)
+5. [How Linux Gets Pages: The Page Allocator](#5-how-linux-gets-pages-the-page-allocator)
+6. [The Buddy System: How PageForge Implements It](#6-the-buddy-system-how-pageforge-implements-it)
 7. [Virtual Memory and Paging](#7-virtual-memory-and-paging)
-8. [How Page Tables Work — The Two-Level Walk](#8-how-page-tables-work--the-two-level-walk)
+8. [How Page Tables Work: The Sv39 Three-Level Walk](#8-how-page-tables-work-the-sv39-three-level-walk)
 9. [PageForge's Paging Simulation](#9-pageforges-paging-simulation)
-10. [The Slab Allocator — Linux's Object Cache](#10-the-slab-allocator--linuxs-object-cache)
+10. [The Slab Allocator: Linux's Object Cache](#10-the-slab-allocator-linuxs-object-cache)
 11. [PageForge's Slab Implementation](#11-pageforges-slab-implementation)
-12. [kmalloc — The General-Purpose Allocator](#12-kmalloc--the-general-purpose-allocator)
-13. [PageForge's kmalloc/kfree/calloc/realloc](#13-pageforges-kmallocktreecallocrealloc)
+12. [kmalloc: The General-Purpose Allocator](#12-kmalloc-the-general-purpose-allocator)
+13. [PageForge's kmalloc/kfree/calloc/realloc](#13-pageforges-kmallockfreecallocrealloc)
 14. [Process Address Space](#14-process-address-space)
-15. [The syscall Layer — Talking to the OS](#15-the-syscall-layer--talking-to-the-os)
-16. [Building PageForge — Design Decisions](#16-building-pageforge--design-decisions)
-17. [Running PageForge Under QEMU](#17-running-pageforge-under-qemu)
-18. [Concepts Quick Reference](#18-concepts-quick-reference)
-19. [Glossary](#19-glossary)
+15. [The syscall Layer: Talking to the OS](#15-the-syscall-layer-talking-to-the-os)
+16. [Building PageForge: Design Decisions](#16-building-pageforge-design-decisions)
 
 ---
 
@@ -38,10 +45,11 @@
 Memory management inside the kernel is not as easy as memory management outside
 the kernel. Simply put, the kernel lacks luxuries enjoyed by user-space.
 
-> *"Unlike user-space, the kernel is not always afforded the capability to easily allocate
-> memory. For example, the kernel cannot easily deal with memory allocation errors, and
-> the kernel often cannot sleep."*
-> — Robert Love, Linux Kernel Development, p.231
+User space can allocate memory casually. If it fails, you get NULL back and
+the process can complain and exit. If memory is tight, the process sleeps
+until some frees up. The kernel gets neither of those. It often cannot sleep,
+because it may be holding a lock or servicing an interrupt, and it has nobody
+to report a failure to.
 
 What does that mean in practice?
 
@@ -58,14 +66,14 @@ free(buf);
 - You may be inside an interrupt handler that **cannot sleep**.
 - You need to know if the memory is **physically contiguous** (required for DMA).
 - You need to control which **memory zone** the allocation comes from.
-- You need to be extremely careful — a mistake hangs the machine silently.
+- You need to be extremely careful: a mistake hangs the machine silently.
 
 This is why the Linux kernel has a carefully layered memory management subsystem,
 and why understanding it makes you a fundamentally better systems programmer.
 
 ---
 
-## 2. The Big Picture — Four Layers
+## 2. The Big Picture: Four Layers
 
 Linux kernel memory management is a stack of layers. Each layer depends on the one
 below it:
@@ -76,12 +84,12 @@ User programs
      ▼
 ┌─────────────────────────────────────────────┐
 │  Layer 4: kmalloc / kfree / vmalloc          │  General byte-sized allocations
-│  (mm/slab.c or mm/slub.c for kmalloc)        │
+│  (mm/slub.c, via mm/slab_common.c)           │
 └────────────────────┬────────────────────────┘
                      │ uses
 ┌────────────────────▼────────────────────────┐
 │  Layer 3: Slab Allocator                     │  Object caches, fixed-size chunks
-│  (mm/slab.c, mm/slub.c, mm/slob.c)          │
+│  (mm/slub.c)                                 │
 └────────────────────┬────────────────────────┘
                      │ uses
 ┌────────────────────▼────────────────────────┐
@@ -99,7 +107,7 @@ User programs
 ```
 ┌─────────────────────────────────────────────┐
 │  Virtual Memory / Page Tables (MMU)          │  VA → PA translation
-│  (mm/memory.c, arch/x86/mm/)                │
+│  (mm/memory.c, arch/riscv/mm/)              │
 └─────────────────────────────────────────────┘
 ```
 
@@ -107,45 +115,44 @@ PageForge implements all of these layers from scratch in pure C.
 
 ```
 ┌─────────────────────────────────────────────┐
-│  my_alloc.c — my_kmalloc / my_kfree etc.     │  Layer 4
+│  my_alloc.c, my_kmalloc / my_kfree etc.     │  Layer 4
 └────────────────────┬────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────┐
-│  my_slab.c  — my_slab_alloc / my_slab_free  │  Layer 3
+│  my_slab.c, my_slab_alloc / my_slab_free  │  Layer 3
 └────────────────────┬────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────┐
-│  my_buddy.c — my_alloc_pages / my_free_pages │  Layer 2
+│  my_buddy.c, my_alloc_pages / my_free_pages │  Layer 2
 └────────────────────┬────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────┐
-│  my_syscall.c — my_mmap (anonymous pages)   │  Layer 1
+│  my_syscall.c, my_mmap (anonymous pages)   │  Layer 1
 └─────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Physical Memory — Pages
+## 3. Physical Memory: Pages
 
 ### 3.1 What Is a Page?
 
 The kernel treats physical pages as the **basic unit of memory management**.
 
-> *"Although the processor's smallest addressable unit is a byte or a word, the memory
-> management unit (MMU, the hardware that manages memory and performs virtual to
-> physical address translations) typically deals in pages."*
-> — Robert Love, p.231
+The processor can address a single byte, but the MMU does not work at that
+granularity. It translates addresses a page at a time, so a page is the
+smallest thing the kernel can meaningfully hand out, protect, or map.
 
 Think of it this way:
 - RAM is divided into fixed-size chunks called **pages** (or **page frames**).
-- On most 32-bit architectures (x86), a page is **4096 bytes = 4 KB**.
+- On RISC-V (and most other architectures), a page is **4096 bytes = 4 KB**.
 - On 64-bit architectures it can be 8 KB or larger.
 - 1 GB of RAM = 262,144 pages of 4 KB each.
 
-The MMU — a piece of hardware inside the CPU — manages all translations from
+The MMU, a piece of hardware inside the CPU, manages all translations from
 virtual addresses to physical addresses using page-granularity tables.
 
-### 3.2 struct page — The Kernel's Page Descriptor
+### 3.2 struct page: The Kernel's Page Descriptor
 
 The kernel represents **every physical page** in the system with a `struct page`
 structure. This is defined in `<linux/mm_types.h>`:
@@ -177,7 +184,7 @@ struct page {
 
 You might wonder: if `struct page` takes 40 bytes and we have 524,288 pages on
 a 4 GB machine (with 8 KB pages), that's only 20 MB of overhead for tracking
-all physical memory. About 0.5% of total RAM — a very reasonable trade-off.
+all physical memory. About 0.5% of total RAM, a very reasonable trade-off.
 
 **Important:** `struct page` describes a **physical** page, not a virtual one.
 The same physical page can be mapped by many virtual addresses simultaneously
@@ -197,7 +204,7 @@ uint8_t bitmap[ARENA_PAGES / 8];
 
 When you call `my_alloc_pages(0)`, you get back one physical 4 KB page.
 When you call `my_free_pages(ptr, 0)`, that page is returned to the free pool.
-The bitmap and free-lists are PageForge's simplified version of `mem_map` — the
+The bitmap and free-lists are PageForge's simplified version of `mem_map`, the
 kernel's global array of `struct page` structures.
 
 ---
@@ -209,56 +216,65 @@ kernel's global array of `struct page` structures.
 Not all memory is equal. The kernel divides physical memory into **zones** because
 of hardware constraints:
 
-> *"Because of hardware limitations, the kernel cannot treat all pages as identical.
-> Some pages, because of their physical address in memory, cannot be used for certain
-> tasks."*
-> — Robert Love, p.233
+Hardware limitations mean the kernel cannot treat every page as
+interchangeable. Where a page physically sits decides what it can be used for.
 
-Linux has to deal with two hardware shortcomings:
-1. Some hardware devices can only perform DMA (Direct Memory Access) to certain
-   memory addresses (e.g., ISA devices on x86 can only reach the first 16 MB).
-2. On 32-bit x86, the kernel can only directly address 896 MB of RAM, even if
-   the machine has more (because of how the kernel's virtual address space works).
+The constraint is always the same shape: some device, or some part of the
+kernel, cannot reach every physical address, so the allocator has to know
+which pages are reachable from where.
 
-### 4.2 The Four Zones
+### 4.2 Zones on rv64
 
-Linux defines these zones in `<linux/mmzone.h>`:
+Linux defines the zones in `<linux/mmzone.h>`, but which ones actually exist
+depends on the architecture. A 64-bit RISC-V kernel uses two:
 
-| Zone | Description | Physical Range (x86-32) |
-|------|-------------|------------------------|
-| `ZONE_DMA` | Pages that can undergo DMA (for old ISA devices) | 0 – 16 MB |
-| `ZONE_DMA32` | Like DMA but accessible only by 32-bit devices | 0 – 4 GB |
-| `ZONE_NORMAL` | Normal, regularly mapped pages | 16 MB – 896 MB |
-| `ZONE_HIGHMEM` | Pages NOT permanently mapped into the kernel address space | > 896 MB |
+| Zone | Description | Physical Range |
+|------|-------------|----------------|
+| `ZONE_DMA32` | Pages below 4 GB, for devices whose DMA engine only drives 32 address bits | 0 to 4 GB |
+| `ZONE_NORMAL` | Everything else, all directly mapped by the kernel | above 4 GB |
 
-**Table 12.1 from the book — Zones on x86-32:**
+That is the whole list. `ZONE_DMA32` is there because plenty of real
+peripherals still drive only 32 address bits, so a driver that needs a buffer
+its hardware can reach has to get one from below the 4 GB line. Everything
+else is `ZONE_NORMAL`.
 
-| Zone | Description | Physical Memory |
-|------|-------------|-----------------|
-| `ZONE_DMA` | DMA-able pages | < 16 MB |
-| `ZONE_NORMAL` | Normally addressable pages | 16–896 MB |
-| `ZONE_HIGHMEM` | Dynamically mapped pages | > 896 MB |
+Two other zones turn up constantly in older material and are not used here:
 
-**Why does ZONE_HIGHMEM exist on 32-bit?**
+- **`ZONE_DMA`** covered the first 16 MB, because ISA devices could not
+  address past it. RISC-V has no ISA bus and no such devices, so the zone is
+  not configured.
+- **`ZONE_HIGHMEM`** does not exist on any 64-bit kernel, RISC-V included.
+  It solved a problem 64-bit machines simply do not have, described below.
 
-On a 32-bit system, virtual addresses are only 32 bits wide — that's 4 GB total
-address space. Linux splits this: 3 GB for user space, 1 GB for the kernel.
-But the kernel's 1 GB virtual address space can only directly map 896 MB of RAM.
-Any physical RAM above 896 MB is "high memory" — it exists but is not permanently
-mapped. The kernel must use special functions (`kmap()`) to temporarily map these
-pages when needed.
+**Why ZONE_HIGHMEM existed, and why rv64 has no use for it**
 
-On modern 64-bit systems, there is **no** `ZONE_HIGHMEM` because 64-bit virtual
-addresses are far more than enough to map all physical RAM.
+The problem was never about how much RAM a machine had. It was about how much
+of it the kernel could *see at once*. On a 32-bit kernel the entire virtual
+address space is 4 GB, split 3 GB for user space and 1 GB for the kernel, and
+only about 896 MB of that kernel window could permanently map physical RAM.
+Any RAM past that point existed but had nowhere to live in the kernel's
+address space, so it was called "high memory" and had to be mapped
+temporarily, one window at a time, with `kmap()`.
 
-### 4.3 struct zone — Representing a Zone
+Sv39 gives the kernel a 256 GB half of the address space to itself. Every byte
+of physical RAM on any real RISC-V board fits in there with room to spare, so
+the kernel maps all of it once at boot and never thinks about it again. There
+is no high memory, no `kmap()`, and no split between RAM you can address and
+RAM you cannot.
+
+Worth understanding rather than skipping, because plenty of kernel
+documentation still assumes the 32-bit world.
+When `kmap()` or `ZONE_HIGHMEM` comes up, that is the problem being solved,
+and on rv64 the address space is large enough that it never arises.
+
+### 4.3 struct zone: Representing a Zone
 
 Each zone is represented by `struct zone` in `<linux/mmzone.h>`:
 
 ```c
 struct zone {
     unsigned long    watermark[NR_WMARK]; /* min/low/high watermarks */
-    struct free_area free_area[MAX_ORDER];/* buddy free lists per order */
+    struct free_area free_area[NR_PAGE_ORDERS];/* buddy free lists per order */
     spinlock_t       lock;                /* protects this structure   */
     unsigned long    zone_start_pfn;      /* first page frame number   */
     unsigned long    present_pages;       /* total usable pages        */
@@ -272,17 +288,31 @@ The `watermark` array holds three thresholds:
 - **low**: kswapd starts reclaiming pages.
 - **high**: Zone is sufficiently stocked; kswapd stops.
 
-The `free_area` array is the heart of the buddy allocator — it holds one free
-list per order (order 0 = 1 page, order 1 = 2 pages, ... order 10 = 1024 pages).
+The `free_area` array is the heart of the buddy allocator. It holds one entry
+per order: order 0 is 1 page, order 1 is 2 pages, up to order 10 at 1024
+pages.
+
+Two naming details, because older material gets both wrong. The largest order
+is `MAX_PAGE_ORDER`, which is 10. It was called `MAX_ORDER` until 6.5, when
+the meaning of the constant changed from exclusive to inclusive and it was
+renamed so that out-of-tree code would fail loudly instead of silently
+allocating the wrong size. The array is sized `NR_PAGE_ORDERS`, which is
+`MAX_PAGE_ORDER + 1`, so 11 entries.
+
+And each `free_area` is not one list. It is
+`struct list_head free_list[MIGRATE_TYPES]`, because the kernel keeps free
+pages separated by whether they can be moved, which is what makes compaction
+possible. PageForge has one list per order, which is the same idea with the
+migration types left out.
 
 ### 4.4 PageForge's Simplified Model
 
-PageForge does not implement multiple zones — it operates with a single flat
+PageForge does not implement multiple zones, it operates with a single flat
 4 MB arena. In a real kernel you would have separate zones, each with its own
 `free_area[]`. PageForge simplifies this:
 
 ```c
-// my_buddy.h
+// my_buddy.h  (PageForge keeps the old name for its own constant)
 #define MAX_ORDER     10
 #define ARENA_PAGES   1024        // 1024 pages × 4 KB = 4 MB
 #define ARENA_SIZE    (ARENA_PAGES * PAGE_SIZE)
@@ -296,11 +326,12 @@ typedef struct {
 } my_buddy_t;
 ```
 
-This directly mirrors `struct zone`'s `free_area[]` array.
+This is `struct zone`'s `free_area[]` with the zones, the watermarks, the
+locking and the migration types taken out.
 
 ---
 
-## 5. How Linux Gets Pages — The Page Allocator
+## 5. How Linux Gets Pages: The Page Allocator
 
 ### 5.1 The Core Function
 
@@ -331,7 +362,7 @@ void free_pages(unsigned long addr, unsigned int order);
 void free_page(unsigned long addr);
 ```
 
-### 5.2 GFP Flags — Controlling Allocation Behavior
+### 5.2 GFP Flags: Controlling Allocation Behavior
 
 Every allocation call takes a `gfp_mask` (GFP = "Get Free Page") parameter.
 These flags tell the allocator:
@@ -339,21 +370,28 @@ These flags tell the allocator:
 - Which memory zone to allocate from
 - What the memory will be used for
 
-**Action Modifiers** (Table 12.3 from the book):
+**Action modifiers:**
+
+These are defined in `<linux/gfp_types.h>`:
 
 | Flag | Meaning |
 |------|---------|
-| `__GFP_WAIT` | The allocator can sleep |
-| `__GFP_HIGH` | The allocator can access emergency pools |
-| `__GFP_IO` | The allocator can start disk I/O |
-| `__GFP_FS` | The allocator can start filesystem I/O |
-| `__GFP_COLD` | Use cache-cold pages |
-| `__GFP_NOWARN` | Don't print failure warnings |
-| `__GFP_REPEAT` | Retry if allocation fails |
-| `__GFP_NOFAIL` | Repeat until allocation succeeds |
-| `__GFP_NORETRY` | Never retry |
+| `__GFP_DIRECT_RECLAIM` | The caller may sleep while the allocator reclaims memory |
+| `__GFP_KSWAPD_RECLAIM` | Wake kswapd to reclaim in the background |
+| `__GFP_HIGH` | The allocation is high priority and may dip into reserves |
+| `__GFP_IO` | The allocator may start disk I/O |
+| `__GFP_FS` | The allocator may call into the filesystem |
+| `__GFP_ZERO` | Return zeroed memory |
+| `__GFP_NOWARN` | Do not warn on failure |
+| `__GFP_NOFAIL` | Retry forever, never fail |
+| `__GFP_NORETRY` | Fail rather than retry hard |
 
-**Zone Modifiers** (Table 12.4):
+Two flags that appear all over older documentation are gone. `__GFP_WAIT` was
+split into the two reclaim flags above, and `__GFP_COLD`, which asked for
+cache-cold pages, was removed once it stopped earning its keep. Neither exists
+in `gfp_types.h` any more, so code using them will not build.
+
+**Zone modifiers:**
 
 | Flag | Meaning |
 |------|---------|
@@ -361,18 +399,18 @@ These flags tell the allocator:
 | `__GFP_DMA32` | Allocate from `ZONE_DMA32` only |
 | `__GFP_HIGHMEM` | Allocate from `ZONE_HIGHMEM` or `ZONE_NORMAL` |
 
-**Type Flags** (Table 12.5 — the ones you actually use):
+**Type flags**, the ones you actually use:
 
 | Flag | When to Use |
 |------|-------------|
-| `GFP_ATOMIC` | Interrupt handlers, softirqs, tasklets — must not sleep |
-| `GFP_KERNEL` | Normal process context — can sleep, recommended default |
+| `GFP_ATOMIC` | Interrupt handlers, softirqs, tasklets, must not sleep |
+| `GFP_KERNEL` | Normal process context, can sleep, recommended default |
 | `GFP_USER` | Allocating memory for user-space processes |
 | `GFP_DMA` | Need DMA-able memory (device drivers) |
-| `GFP_NOIO` | Block I/O code — can block but not start disk I/O |
-| `GFP_NOFS` | Filesystem code — can block and start disk I/O, not FS I/O |
+| `GFP_NOIO` | Block I/O code, can block but not start disk I/O |
+| `GFP_NOFS` | Filesystem code, can block and start disk I/O, not FS I/O |
 
-**When to use which flag (Table 12.7):**
+**When to use which flag:**
 
 | Situation | Use This Flag |
 |-----------|--------------|
@@ -383,13 +421,13 @@ These flags tell the allocator:
 | Need DMA memory, can sleep | `GFP_DMA | GFP_KERNEL` |
 | Need DMA memory, cannot sleep | `GFP_DMA | GFP_ATOMIC` |
 
-**PageForge does not implement GFP flags** — our `my_alloc_pages(order)` has
+**PageForge does not implement GFP flags**, our `my_alloc_pages(order)` has
 no flags parameter. This is intentional: we are a user-space simulation, there
 are no interrupt contexts, and all allocations can trivially "sleep".
 
 ---
 
-## 6. The Buddy System — How PageForge Implements It
+## 6. The Buddy System: How PageForge Implements It
 
 ### 6.1 The Problem Buddy Solves
 
@@ -454,7 +492,7 @@ typedef struct {
 ```
 
 Notice: free blocks store their `next` pointer **inside themselves** at offset 0.
-This is an "intrusive linked list" — no extra memory needed for list nodes.
+This is an "intrusive linked list", no extra memory needed for list nodes.
 Linux's real buddy allocator uses the same technique via `struct list_head`.
 
 ### 6.4 Initialization
@@ -495,7 +533,7 @@ buddy allocator in the largest power-of-2 aligned chunks possible.
 
 For 1024 pages: the first call releases all 1024 pages as one order-10 block.
 
-### 6.5 Allocation — Splitting
+### 6.5 Allocation: Splitting
 
 ```
 my_alloc_pages(order):
@@ -570,7 +608,7 @@ void *my_alloc_pages(uint32_t order)
 }
 ```
 
-### 6.6 Freeing — Coalescing
+### 6.6 Freeing: Coalescing
 
 This is the buddy magic. When freeing a block, we check if its buddy is also free.
 If so, merge them into a larger block, then check the buddy at the next order too.
@@ -679,287 +717,136 @@ The kernel uses similar arithmetic with `page_to_pfn()` and `pfn_to_page()` macr
 
 ## 7. Virtual Memory and Paging
 
+Everything up to here has been about physical memory: pages, zones, and the
+allocator that hands them out. This section is about the other half, the
+addresses programs actually use.
+
 ### 7.1 Why Virtual Memory Exists
 
-Without virtual memory, every program would need to know where in physical RAM
-it would run. Programs would conflict, there would be no isolation, and it would
-be impossible to run more programs than RAM. Virtual memory solves this:
+Without it, every program would have to know where in physical RAM it was
+going to run. Programs would collide, nothing would be isolated, and you could
+never run more of them than would fit in memory at once.
 
-1. **Isolation**: Each process has its own virtual address space. A bug in one
-   process cannot corrupt another's memory.
-2. **Larger address space**: Programs can use up to 3 GB (on 32-bit) or
-   128 TB (on 64-bit) of virtual memory, regardless of actual RAM.
-3. **Sharing**: Multiple processes can map the same physical page (e.g., a
-   shared library) to different virtual addresses.
-4. **Swap**: Pages that haven't been used recently can be swapped to disk,
-   freeing physical RAM.
+Virtual memory gives four things:
 
-### 7.2 The MMU — Memory Management Unit
+1. **Isolation.** Every process gets its own address space. A bug in one
+   cannot corrupt another's memory, because it has no way to name it.
+2. **Room.** A process sees one large flat range of addresses regardless of
+   how much RAM exists or how scattered its pages are.
+3. **Sharing.** Several processes can map the same physical page, which is how
+   one copy of a shared library serves everybody.
+4. **Permissions.** Each page is separately readable, writable or executable,
+   which is what stops a program writing over its own code.
 
-The MMU is hardware built into the CPU (since the 80386 on x86). Its job:
+### 7.2 The MMU and the TLB
 
-```
-CPU generates virtual address
-        │
-        ▼
-  ┌─────────────┐
-  │     MMU     │  Walks the page table using the CR3 register
-  └──────┬──────┘
-         │ translates to
-         ▼
-  Physical address sent to RAM
-```
+The conversion happens in hardware, in the MMU, on every single memory access.
+It reads the page tables the kernel built and turns a virtual address into a
+physical one.
 
-The MMU maintains a **Translation Lookaside Buffer (TLB)** — a small, fast cache
-of recent VA→PA translations. A TLB miss causes a page table walk (slow). TLB
-flushes happen on context switches and large memory operations.
+Doing that properly means several memory reads before the real one, so the
+result is cached in the TLB. A hit skips the walk entirely. A miss pays for
+the full lookup.
 
-### 7.3 Virtual Address Layout on x86-32
+On RISC-V the MMU finds the tables through the `satp` register, and the kernel
+must invalidate stale TLB entries itself with `sfence.vma`. Nothing is flushed
+implicitly.
 
-On a 32-bit x86 Linux system:
+### 7.3 Virtual Address Layout on rv64
 
-```
-0xFFFFFFFF  ────────────────────────────────────
-            │  Kernel space (1 GB)              │  (process cannot access)
-0xC0000000  ────────────────────────────────────
-            │                                   │
-            │  User space (3 GB)                │
-            │                                   │
-            │  Stack (grows downward)            │
-            │  ......                           │
-            │  Memory-mapped files              │
-            │  ......                           │
-            │  Heap (grows upward)              │
-            │  BSS (uninitialized data)         │
-            │  Data (initialized data)          │
-            │  Text (code)                      │
-0x00000000  ────────────────────────────────────
-```
-
-The kernel maps itself into the top 1 GB of every process's virtual address space
-(above 0xC0000000). This means the kernel is always "there" in the address space —
-system calls don't need to change the page table, just the privilege level.
+Sv39 gives 39 bits of address, which is 512 GB, split into two halves with a
+large illegal gap between them. The bottom half is user space, the top half is
+the kernel, and the kernel half is mapped into every process so a syscall
+changes privilege level without changing `satp`.
 
 ---
 
-## 8. How Page Tables Work — The Two-Level Walk
+## 8. How Page Tables Work: The Sv39 Three-Level Walk
 
-### 8.1 The Problem
+A flat table with one entry per page would need about 1 GB per process, nearly
+all of it empty. So the page table is a tree instead: three levels of 512
+entries, where a branch that maps nothing is simply never allocated.
 
-A 32-bit address space has 4 GB = 4,294,967,296 addresses.
-If we tracked every possible 4 KB page: 4GB / 4KB = 1,048,576 entries.
-At 4 bytes per entry, a flat page table would be 4 MB **per process**.
-With 1000 processes: 4 GB just for page tables!
-
-The solution: a **hierarchical page table** — a tree structure where only the
-pages that are actually used get allocated.
-
-### 8.2 Two-Level Page Table (x86-32)
-
-Linux on x86-32 uses a two-level page table:
+The address splits into three 9-bit indexes and a 12-bit offset:
 
 ```
-Virtual Address (32 bits)
-┌─────────────┬─────────────┬──────────────┐
-│  PD Index   │  PT Index   │    Offset    │
-│  [31..22]   │  [21..12]   │  [11..0]    │
-│  10 bits    │  10 bits    │  12 bits    │
-└─────────────┴─────────────┴──────────────┘
-     │               │              │
-     │               │              └──► byte offset within page (0-4095)
-     │               └─────────────────► index into Page Table (1024 entries)
-     └─────────────────────────────────► index into Page Directory (1024 entries)
++-------------+--------+--------+--------+------------+
+|   63..39    | VPN[2] | VPN[1] | VPN[0] |   offset   |
+| sign extend | 9 bits | 9 bits | 9 bits |  12 bits   |
++-------------+--------+--------+--------+------------+
 ```
 
-**Step by step:**
+Each index picks one entry in one table. The offset is carried through
+untouched and added at the end.
 
-```
-1. CR3 register → base address of Page Directory (PGD)
+An entry is 64 bits: the physical page number in bits 53..10, and flag bits
+V, R, W, X, U, G, A and D at the bottom. Whether an entry is a pointer to the
+next level or the end of the walk is decided by its permissions, not by a
+type field, and that same rule is where 2 MB and 1 GB pages come from.
 
-2. VA[31..22] (10 bits) → index into PGD
-   PGD[PD_index] → Page Directory Entry (PDE)
-   PDE contains: physical address of a Page Table + flags
+> **This is covered properly in [PAGING.md](PAGING.md).** That document works
+> through an address by hand, explains why the page number shift is 10 while
+> the page shift is 12, and covers `satp`, the fault causes and the permission
+> checks in detail. It is the one to read if you want to understand the walk
+> rather than just place it in context.
 
-3. VA[21..12] (10 bits) → index into Page Table
-   PT[PT_index] → Page Table Entry (PTE)
-   PTE contains: physical address of a 4 KB page + flags
+### 8.1 Beyond Sv39
 
-4. VA[11..0] (12 bits) → byte offset within that 4 KB page
-   Physical Address = PTE's page address + offset
-```
-
-**Size math:**
-- Page Directory: 1024 entries × 4 bytes = 4 KB (exactly one page!)
-- Each Page Table: 1024 entries × 4 bytes = 4 KB (exactly one page!)
-- Maximum Page Tables per process: 1024
-- Total physical pages mappable: 1024 × 1024 = 1,048,576 = 4 GB ✓
-
-**Page Table Entry flags:**
-
-```
-PTE (32 bits):
-┌──────────────────────────┬──┬──┬──┬──┬──┐
-│  Physical Page Number    │ D│ A│ U│ W│ P│
-│  [31..12] (20 bits)      │  │  │  │  │  │
-└──────────────────────────┴──┴──┴──┴──┴──┘
-  P  = Present (1 = page is in RAM, 0 = page fault!)
-  W  = Write enable (1 = read/write, 0 = read-only)
-  U  = User access (1 = user can access, 0 = kernel only)
-  A  = Accessed (hardware sets this on any access)
-  D  = Dirty (hardware sets this on write)
-```
-
-A page fault occurs when the CPU tries to access a page whose Present bit is 0.
-The kernel's page fault handler (`do_page_fault()` on x86) either:
-- Loads the page from disk (swap or memory-mapped file) — **demand paging**
-- Sends `SIGSEGV` to the process (invalid access) — **segfault**
-
-### 8.3 Modern x86-64: Four-Level Page Tables
-
-On 64-bit x86, Linux uses four levels:
-
-```
-Virtual Address (48 bits used out of 64)
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│  PGD idx │  PUD idx │  PMD idx │  PTE idx │  Offset  │
-│  [47..39]│  [38..30]│  [29..21]│  [20..12]│  [11..0] │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
-     9 bits     9 bits     9 bits     9 bits    12 bits
-```
-
-With 48-bit virtual addresses: 2^48 = 256 TB of virtual address space per process.
-
-PageForge simulates the simpler 2-level scheme (x86-32 style) — perfectly
-adequate for teaching the concepts.
+Sv48 and Sv57 add one and two more levels of the same 9 bits each, reaching 48
+and 57 bits of address. Nothing else changes. Linux picks whichever the
+hardware reports at boot and folds the unused levels away at compile time,
+which is why the same generic code services all three.
 
 ---
 
 ## 9. PageForge's Paging Simulation
 
-### 9.1 Design
+`src/my_paging.c` implements that walk in software, in about 176 lines.
 
-```c
-// my_paging.h
+There is one walk function in the file. Three public entry points wrap it:
+`my_virt_to_phys()` translates, `my_access()` translates and then checks the
+access against the leaf's permissions the way hardware does, and
+`my_page_walk()` does the same walk while printing every step.
 
-#define PD_SIZE    1024          // Page Directory: 1024 entries
-#define PT_SIZE    1024          // Each Page Table: 1024 entries
-
-#define PD_INDEX(va)   (((va) >> 22) & 0x3FF)  // bits [31..22]
-#define PT_INDEX(va)   (((va) >> 12) & 0x3FF)  // bits [21..12]
-#define PG_OFFSET(va)  ((va) & 0xFFF)           // bits [11..0]
-
-// Page table entry flags
-#define PTE_PRESENT   (1u << 0)
-#define PTE_WRITE     (1u << 1)
-#define PTE_USER      (1u << 2)
-#define PTE_ACCESSED  (1u << 5)
-#define PTE_DIRTY     (1u << 6)
-
-// A page table: 1024 entries, each a uint32_t
-typedef uint32_t my_page_table_t[PT_SIZE];
-
-// A page directory: 1024 entries, each is (ptr to PT | flags) or 0
-typedef uint32_t my_page_dir_t[PD_SIZE];
-```
-
-### 9.2 Creating a Page Directory
-
-```c
-my_page_dir_t *my_pgd_create(void)
-{
-    // Allocate one page for the Page Directory
-    my_page_dir_t *pgd = (my_page_dir_t *)my_mmap(PAGE_SIZE);
-    // Zero it out (all entries = 0 = not present)
-    for (int i = 0; i < PD_SIZE; i++) (*pgd)[i] = 0;
-    return pgd;
-}
-```
-
-### 9.3 Mapping a Virtual Page to a Physical Frame
-
-```c
-void my_map_page(my_page_dir_t *pgd,
-                 uint32_t va,   // virtual address
-                 uint32_t pa,   // physical address
-                 uint32_t flags)
-{
-    uint32_t pd_idx = PD_INDEX(va);
-    uint32_t pt_idx = PT_INDEX(va);
-
-    // Does a page table exist for this PD entry?
-    if (!((*pgd)[pd_idx] & PTE_PRESENT)) {
-        // Allocate a new page table
-        my_page_table_t *pt = (my_page_table_t *)my_mmap(PAGE_SIZE);
-        for (int i = 0; i < PT_SIZE; i++) (*pt)[i] = 0;
-        // Store its address (aligned, so lower 12 bits are free for flags)
-        (*pgd)[pd_idx] = (uint32_t)(uintptr_t)pt | PTE_PRESENT | PTE_WRITE;
-    }
-
-    // Get the page table
-    my_page_table_t *pt = (my_page_table_t *)
-                          (uintptr_t)((*pgd)[pd_idx] & ~0xFFFu);
-
-    // Write the PTE: physical page base address + flags
-    (*pt)[pt_idx] = (pa & ~0xFFFu) | flags | PTE_PRESENT;
-}
-```
-
-### 9.4 Walking a Page Table (Simulating the MMU)
-
-```c
-uint32_t my_virt_to_phys(my_page_dir_t *pgd, uint32_t va)
-{
-    uint32_t pd_idx = PD_INDEX(va);
-    uint32_t pt_idx = PT_INDEX(va);
-    uint32_t offset = PG_OFFSET(va);
-
-    // Step 1: Look up Page Directory Entry
-    uint32_t pde = (*pgd)[pd_idx];
-    if (!(pde & PTE_PRESENT)) return 0;   // Page fault: PD entry not present
-
-    // Step 2: Get Page Table, look up PTE
-    my_page_table_t *pt = (my_page_table_t *)(uintptr_t)(pde & ~0xFFFu);
-    uint32_t pte = (*pt)[pt_idx];
-    if (!(pte & PTE_PRESENT)) return 0;   // Page fault: PT entry not present
-
-    // Step 3: Combine physical page base with offset
-    return (pte & ~0xFFFu) | offset;
-}
-```
-
-### 9.5 Sample Page Walk Output
-
-When `demo_paging()` runs in PageForge, you see output like:
+Running `make run` prints a full walk per address:
 
 ```
-  page_walk(VA=0x00001ABC):
-    PD[0] → PT base=0x... (present, write)
-    PT[1] → PA base=0x00100000 (present, write)
-    offset = 0xABC
-    Physical address = 0x00100ABC
+  Page Walk  VA = 0x1abc
+  ├─ VPN[2]    : 0  (bits 38..30)
+  ├─ VPN[1]    : 0  (bits 29..21)
+  ├─ VPN[0]    : 1  (bits 20..12)
+  ├─ Offset    : 0xabc  (bits 11..0)
+  ├─ PGD[0] = 0x1ef3439d2c01  [V-----]
+  ├─ PMD[0] = 0x1ef3439d2401  [V-----]
+  ├─ PTE[1] = 0x200400cb  [VR-X-A]
+  └─ Physical = 0x80100abc
 ```
 
-This is exactly what the hardware MMU does — just done in software so you can
-observe each step.
+The one place the model departs from hardware is worth knowing: each table
+carries an array of real C pointers alongside its entries, because a user
+process cannot follow an invented physical address. Real hardware needs no
+such thing.
+
+For the full walkthrough, the worked examples and how all of it lines up with
+`arch/riscv/mm`, see [PAGING.md](PAGING.md).
 
 ---
 
-## 10. The Slab Allocator — Linux's Object Cache
+## 10. The Slab Allocator: Linux's Object Cache
 
 ### 10.1 The Problem Slab Solves
 
 The page allocator gives you whole pages (4 KB minimum). But kernel code constantly
-needs small objects — a `task_struct` (process descriptor) might be 1.7 KB, an
+needs small objects, a `task_struct` (process descriptor) might be 1.7 KB, an
 `inode` might be 0.5 KB. If you allocated a whole page for each one, you would
 waste enormous amounts of memory.
 
 Enter free lists:
 
-> *"To facilitate frequent allocations and deallocations of data, programmers often
-> introduce free lists. A free list contains a block of available, already allocated,
-> data structures. When code requires a new instance of a data structure, it can grab
-> one of the structures off the free list."*
-> — Robert Love, p.245
+A free list is the usual answer: keep a stash of already-allocated structures
+lying around, and when code needs one, take it off the list instead of
+allocating from scratch. Freeing puts it back on the list rather than
+returning it to the system.
 
 But ad-hoc free lists have a problem: the kernel has no global control. When memory
 is low, there's no way to tell every random free list to shrink.
@@ -968,16 +855,21 @@ is low, there's no way to tell every random free list to shrink.
 
 ### 10.2 Slab Design Principles
 
-> *"The slab layer attempts to leverage several basic tenets:
-> - Frequently used data structures tend to be allocated and freed often, so cache them.
-> - Frequent allocation and deallocation can result in memory fragmentation. To prevent
->   this, the cached free lists are arranged contiguously.
-> - The free list provides improved performance during frequent allocation and
->   deallocation because a freed object can be immediately returned to the next
->   allocation.
-> - If the allocator is aware of concepts such as object size, page size, and total
->   cache size, it can make more intelligent decisions."*
-> — Robert Love, p.246
+The slab layer is built on a few ideas that all follow from each other:
+
+- Structures that get allocated and freed constantly are worth caching.
+- Repeated allocation and freeing fragments memory, so keep the cached objects
+  packed together contiguously.
+- A freed object can go straight back out to the next allocation, which is
+  where most of the speed comes from.
+- An allocator that knows the object size, the page size and the size of its
+  own cache can make far better decisions than a general purpose one.
+
+Linux shipped three implementations of this idea for years: SLAB, SLUB and
+SLOB. That is now history. SLOB was removed in 6.4 and SLAB in 6.8, leaving
+SLUB as the only one, so `mm/slab.c` and `mm/slob.c` no longer exist and
+`mm/slub.c` is what you read. `mm/slab.h` and `mm/slab_common.c` hold the
+shared plumbing.
 
 The slab concept was first implemented in **SunOS 5.4** and described academically
 in the paper: Bonwick, J. "The Slab Allocator: An Object-Caching Kernel Memory
@@ -1066,10 +958,10 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags);
 void kmem_cache_free(struct kmem_cache *cachep, void *objp);
 ```
 
-**Real example from kernel — process descriptor cache:**
+**Real example from kernel, process descriptor cache:**
 
 ```c
-// kernel/fork.c — create the task_struct cache at boot
+// kernel/fork.c, create the task_struct cache at boot
 task_struct_cachep = kmem_cache_create("task_struct",
                                         sizeof(struct task_struct),
                                         ARCH_MIN_TASKALIGN,
@@ -1125,7 +1017,7 @@ PageForge places the slab descriptor at the **very start of its page**:
 #define SLAB_MAGIC  0x51AB1234u
 
 typedef struct my_slab {
-    uint32_t       magic;      // SLAB_MAGIC — detects corrupt/wrong pointers
+    uint32_t       magic;      // SLAB_MAGIC, detects corrupt/wrong pointers
     uint32_t       obj_size;   // size of each object in this slab
     uint32_t       num_total;  // total objects in this slab
     uint32_t       num_free;   // free objects remaining
@@ -1160,7 +1052,7 @@ if (slab->magic != SLAB_MAGIC) panic("double free or corrupt pointer");
 ```
 
 This is exactly how the Linux slab allocator finds the `struct slab` for a
-given object — it masks off the page offset bits.
+given object, it masks off the page offset bits.
 
 ### 11.3 Slab Creation (slab_new)
 
@@ -1266,7 +1158,7 @@ void my_slab_free(void *ptr)
     my_slab_t *slab      = (my_slab_t *)page_base;
 
     if (slab->magic != SLAB_MAGIC)
-        my_panic("my_slab_free: bad magic — double free or corrupt pointer");
+        my_panic("my_slab_free: bad magic, double free or corrupt pointer");
 
     // Find which cache owns this slab
     my_kmem_cache_t *cache = NULL;
@@ -1322,7 +1214,7 @@ void my_slab_free(void *ptr)
 
 ---
 
-## 12. kmalloc — The General-Purpose Allocator
+## 12. kmalloc: The General-Purpose Allocator
 
 ### 12.1 What kmalloc Is
 
@@ -1331,13 +1223,10 @@ void my_slab_free(void *ptr)
 void *kmalloc(size_t size, gfp_t flags);
 ```
 
-> *"The kmalloc() function's operation is similar to that of user-space's familiar
-> malloc() routine, with the exception of the additional flags parameter. The
-> kmalloc() function is a simple interface for obtaining kernel memory in
-> byte-sized chunks. If you need whole pages, the previously discussed interfaces
-> might be a better choice. For most kernel allocations, however, kmalloc() is
-> the preferred interface."*
-> — Robert Love, p.238
+`kmalloc()` behaves much like `malloc()` in user space, apart from the extra
+flags argument. It hands back memory in byte-sized chunks and is the usual
+choice for kernel allocations. If you want whole pages, the page allocator
+interfaces above are the better fit.
 
 Key properties:
 - Returns **physically contiguous** memory (unlike `vmalloc()`)
@@ -1359,10 +1248,10 @@ if (!p)
 void kfree(const void *ptr);
 ```
 
-> *"Do not call this function on memory not previously allocated with kmalloc(), or
-> on memory that has already been freed. Doing so is a bug, resulting in bad behavior
-> such as freeing memory belonging to another part of the kernel."*
-> — Robert Love, p.243
+Only ever pass `kfree()` a pointer that came from `kmalloc()`, and only once.
+Freeing something twice, or freeing a pointer that was never allocated this
+way, corrupts the allocator's bookkeeping and can hand another part of the
+kernel's memory to the next caller.
 
 `kfree(NULL)` is safe and does nothing.
 
@@ -1378,7 +1267,7 @@ if (!buf) { /* handle error */ }
 kfree(buf);
 ```
 
-### 12.3 vmalloc — Virtually Contiguous
+### 12.3 vmalloc: Virtually Contiguous
 
 ```c
 void *vmalloc(unsigned long size);
@@ -1420,11 +1309,11 @@ This means `my_kfree(ptr)` can find the header by doing `ptr - sizeof(header)`.
 
 ```c
 // my_alloc.h
-#define ALLOC_MAGIC       0xA110C8EDu  // "ALLOC8ED" — alloc-ated
+#define ALLOC_MAGIC       0xA110C8EDu  // "ALLOC8ED", alloc-ated
 #define LARGE_THRESHOLD   1024
 
 typedef struct {
-    uint32_t magic;       // ALLOC_MAGIC — detect corrupt/double-free
+    uint32_t magic;       // ALLOC_MAGIC, detect corrupt/double-free
     uint32_t size;        // original requested size (not including header)
     uint8_t  is_large;    // 0 = slab-backed, 1 = buddy-page-backed
     uint8_t  order;       // if is_large: buddy order used
@@ -1474,7 +1363,7 @@ void my_kfree(void *ptr)
     my_alloc_header_t *hdr = (my_alloc_header_t *)ptr - 1;
 
     if (hdr->magic != ALLOC_MAGIC)
-        my_panic("my_kfree: bad magic — double free or corrupt pointer");
+        my_panic("my_kfree: bad magic, double free or corrupt pointer");
 
     // Poison freed memory to catch use-after-free
     uint32_t *p    = (uint32_t *)ptr;
@@ -1562,15 +1451,13 @@ void *my_realloc(void *ptr, size_t new_size)
 
 ### 14.1 What Is a Process Address Space?
 
-Each process in Linux has its own **virtual address space** — a range of virtual
+Each process in Linux has its own **virtual address space**, a range of virtual
 addresses it can use. This virtual address space is divided into regions called
 **VMAs (Virtual Memory Areas)**.
 
-> *"The kernel represents a process's address space with a data structure called the
-> memory descriptor. This structure contains all the information related to the
-> process address space. The memory descriptor is represented by struct mm_struct
-> and is defined in <linux/mm_types.h>."*
-> — Robert Love, Chapter 15
+The kernel describes a process's whole address space with one structure, the
+memory descriptor. It is `struct mm_struct`, defined in
+`<linux/mm_types.h>`, and everything about the process's memory hangs off it.
 
 ### 14.2 struct mm_struct
 
@@ -1597,8 +1484,8 @@ struct mm_struct {
 ```
 
 Key points:
-- Each process has its own `mm_struct` (unless it's a thread — threads share `mm_struct`)
-- `pgd` points to the process's page directory — loaded into CR3 on context switch
+- Each process has its own `mm_struct` (unless it's a thread: threads share `mm_struct`)
+- `pgd` points to the process's root page table: loaded into `satp` on context switch
 - `mmap` list contains all the VMAs (code, data, heap, stack, mapped files)
 
 ### 14.3 struct vm_area_struct (VMA)
@@ -1648,7 +1535,7 @@ Running `cat /proc/self/maps` shows the VMAs of the `cat` process:
 
 ### 14.5 Demand Paging
 
-Linux uses **demand paging** — pages are not loaded into RAM when a process starts.
+Linux uses **demand paging**, pages are not loaded into RAM when a process starts.
 They are loaded lazily on first access.
 
 ```
@@ -1685,7 +1572,7 @@ This is why `fork()` + `exec()` (launching a new program) is very cheap on Linux
 
 ---
 
-## 15. The syscall Layer — Talking to the OS
+## 15. The syscall Layer: Talking to the OS
 
 ### 15.1 Design Philosophy
 
@@ -1693,7 +1580,7 @@ PageForge has one golden rule: **only `my_syscall.c` may include system headers*
 Every other file includes only `my_types.h` and our own headers.
 
 ```c
-// my_syscall.c — the ONLY file with system includes
+// my_syscall.c, the ONLY file with system includes
 #include <sys/mman.h>    // for mmap(), munmap()
 #include <unistd.h>      // for write(), _exit()
 ```
@@ -1702,7 +1589,7 @@ This mirrors the kernel philosophy: the kernel itself never calls "user-space
 libraries." It uses raw system calls. In PageForge, `my_mmap` is our "raw
 hardware interface."
 
-### 15.2 my_mmap — Getting Raw Pages from the OS
+### 15.2 my_mmap: Getting Raw Pages from the OS
 
 ```c
 void *my_mmap(size_t size)
@@ -1728,7 +1615,7 @@ from the hardware memory map).
 to user processes to prevent information leakage (you don't want to read another
 process's old data).
 
-### 15.3 my_write — Printf Without stdio
+### 15.3 my_write: Printf Without stdio
 
 ```c
 void my_write(int fd, const void *buf, size_t len)
@@ -1744,7 +1631,7 @@ void my_write(int fd, const void *buf, size_t len)
 - `my_printf(fmt, ...)` → formats using `__builtin_va_list`, calls `my_write`
 
 `my_printf` supports: `%s`, `%d`, `%u`, `%x`, `%p`, `%c`, `%%`.
-No width specifiers (`%8d`) — intentionally kept minimal.
+No width specifiers (`%8d`), intentionally kept minimal.
 
 ### 15.4 Why No libc?
 
@@ -1759,18 +1646,18 @@ in the kernel. The kernel implements its own versions (`printk`, `kmalloc`,
 // #include <string.h>
 ```
 
-This forces us to truly understand what these functions do — and implement them.
+This forces us to truly understand what these functions do, and implement them.
 
 ---
 
-## 16. Building PageForge — Design Decisions
+## 16. Building PageForge: Design Decisions
 
 ### 16.1 Project Structure
 
 ```
 PageForge/
 ├── include/
-│   ├── my_types.h      ← uint8_t, size_t, NULL, PAGE_SIZE — no system headers
+│   ├── my_types.h      ← uint8_t, size_t, NULL, PAGE_SIZE, no system headers
 │   ├── my_syscall.h    ← declarations for mmap/write/exit wrappers
 │   ├── my_io.h         ← my_printf, my_puts, my_putchar, my_panic
 │   ├── my_paging.h     ← page directory/table structs, flags, API
@@ -1823,13 +1710,14 @@ void my_printf(const char *fmt, ...)
 }
 ```
 
-This works because `__builtin_va_list` is a GCC intrinsic — it doesn't need
+This works because `__builtin_va_list` is a GCC intrinsic, it doesn't need
 `<stdarg.h>`.
 
 **Step 4: Paging (my_paging.c)**
 
-Pure software simulation. No arch-specific code. No CR3 register writes.
-Just arrays (page directory and page tables) and index arithmetic.
+Pure software simulation. No privileged instructions, no `satp` writes, no
+`sfence.vma`. Just arrays (three levels of page tables) and index arithmetic,
+but the bit layout and the pointer-vs-leaf rule are the real Sv39 ones.
 
 **Step 5: Buddy (my_buddy.c)**
 
@@ -1885,30 +1773,43 @@ Phase 4: General allocator
 ### 16.4 The Makefile
 
 ```makefile
-CC     = gcc
-CFLAGS = -Wall -Wextra -Iinclude -O2 -static
+ARCH ?= riscv64
+
+ifeq ($(ARCH),riscv64)
+  CROSS_COMPILE ?= riscv64-linux-gnu-
+  QEMU          ?= qemu-riscv64
+  ARCH_CFLAGS   ?= -march=rv64gc -mabi=lp64d
+else
+  CROSS_COMPILE ?=
+  QEMU          ?=
+  ARCH_CFLAGS   ?=
+endif
+
+CC     = $(CROSS_COMPILE)gcc
+CFLAGS = -Wall -Wextra -Iinclude -O2 $(ARCH_CFLAGS)
 
 SRC = src/my_syscall.c src/my_io.c src/my_paging.c \
       src/my_buddy.c src/my_slab.c src/my_alloc.c src/main.c
 
 pageforge: $(SRC)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -static -o $@ $^
 
 run: pageforge
-	./pageforge
-
-qemu: pageforge
-	@if command -v qemu-x86_64 >/dev/null 2>&1; then \
-	    qemu-x86_64 ./pageforge; \
-	elif command -v qemu-x86_64-static >/dev/null 2>&1; then \
-	    qemu-x86_64-static ./pageforge; \
-	else \
-	    ./pageforge; \
-	fi
+	$(QEMU) ./pageforge
 ```
 
+**`ARCH`**: `riscv64` by default, which cross-compiles with
+`riscv64-linux-gnu-gcc` and runs everything through `qemu-riscv64`. Setting
+`ARCH=host` empties both variables, so the same rules build and run natively,
+needed for valgrind, which has no riscv64 target.
+
+**`-march=rv64gc -mabi=lp64d`**: the baseline RISC-V profile Linux distributions
+target, the G ("general") extension set plus compressed instructions, with a
+64-bit long/pointer ABI and hardware double-precision floats.
+
 **`-static`**: Links all libraries statically into the binary. Required for QEMU
-user-mode emulation, which doesn't set up the dynamic linker path.
+user-mode emulation, which doesn't set up the dynamic linker path, and doubly
+so when cross-compiling, since the host has no rv64 shared libraries.
 
 **`-O2`**: Optimization. Without this, GCC sometimes generates code that is
 hard to reason about for learning purposes. With O2 the generated assembly
@@ -1916,341 +1817,4 @@ matches expectations.
 
 ---
 
-## 17. Running PageForge Under QEMU
-
-### 17.1 What Is QEMU User-Mode?
-
-QEMU has two modes:
-
-1. **Full system emulation**: emulates an entire computer (CPU, RAM, devices,
-   BIOS). Used to run a complete OS image.
-
-2. **User-mode emulation** (`qemu-x86_64`): emulates only the CPU instruction
-   set. Linux system calls are forwarded to the host kernel. No BIOS, no boot
-   process.
-
-PageForge uses **user-mode emulation**. This means:
-- QEMU translates x86_64 instructions to host instructions
-- When the binary calls `mmap()`, QEMU forwards it to the Linux kernel
-- Output from `write()` appears on your terminal
-- No need for a disk image or bootloader
-
-### 17.2 Why This Is Relevant
-
-In a real kernel scenario, you would run your allocator code on bare metal or
-inside a QEMU full-system image with a bootloader. User-mode QEMU is a quick
-way to test Linux binaries with CPU emulation turned on.
-
-This is exactly how Linux kernel developers sometimes test architecture-specific
-code — they use QEMU to emulate ARM or RISC-V and run their code.
-
-### 17.3 Installation
-
-```bash
-# Install QEMU user-mode emulators
-sudo apt install qemu-user          # dynamic binaries
-sudo apt install qemu-user-static   # static binaries (what we need)
-```
-
-### 17.4 Building and Running
-
-```bash
-cd /path/to/PageForge
-make          # builds ./pageforge (static binary)
-make run      # runs ./pageforge directly
-make qemu     # runs under QEMU user-mode emulation
-```
-
-The `run_qemu.sh` script does:
-```bash
-make clean
-make
-make qemu
-```
-
-### 17.5 Expected Output
-
-```
- ██████╗  █████╗  ██████╗ ███████╗
- ██╔══██╗██╔══██╗██╔════╝ ██╔════╝
- ██████╔╝███████║██║  ███╗█████╗
- ██╔═══╝ ██╔══██║██║   ██║██╔══╝
- ██║     ██║  ██║╚██████╔╝███████╗
- ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-  F O R G E  —  Linux MM from scratch
-
-  No libc. No malloc. No printf.
-  Only mmap() + write() from the OS.
-
-============================================================
- Phase 0 — Raw memory from OS  (my_mmap)
-============================================================
-  my_mmap(16 KB) → 0x7f...
-  bytes[0..1] = 0xca 0xfe  (writable ✓)
-  my_munmap() → pages returned to OS
-
-============================================================
- Phase 1 — Page Table Simulation  (my_paging)
-============================================================
-  ...page walk output...
-
-============================================================
- Phase 2 — Buddy Page Allocator  (my_buddy)
-============================================================
-[buddy] init: base=0x...  pages=1024  free=1024
-
---- Buddy Allocator ---
-  total pages : 1024  (4096 KB)
-  free  pages : 1024  (4096 KB)
-  used  pages : 0  (0 KB)
-  order 10 (4096 KB each): 1 block(s)
------------------------
-
-  [alloc] order 0 → 4 KB
-          returned 0x...
-  ...
-
-[free]  freeing all three blocks — expect coalescing
-
---- Buddy Allocator ---
-  total pages : 1024  (4096 KB)
-  free  pages : 1024  (4096 KB)
-  ...
-  order 10 (4096 KB each): 1 block(s)  ← fully coalesced!
------------------------
-```
-
----
-
-## 18. Concepts Quick Reference
-
-### 18.1 Linux MM vs PageForge Mapping
-
-| Linux Kernel | PageForge | File |
-|-------------|-----------|------|
-| `mmap(MAP_ANONYMOUS)` | `my_mmap()` | `my_syscall.c` |
-| `struct page`, `mem_map` | bitmap in `my_buddy_t` | `my_buddy.c` |
-| `ZONE_DMA/NORMAL/HIGHMEM` | single flat arena | `my_buddy.c` |
-| `alloc_pages(order)` | `my_alloc_pages(order)` | `my_buddy.c` |
-| `free_pages(ptr, order)` | `my_free_pages(ptr, order)` | `my_buddy.c` |
-| `struct kmem_cache` | `my_kmem_cache_t` | `my_slab.c` |
-| `struct slab` | `my_slab_t` | `my_slab.c` |
-| `kmem_cache_alloc()` | `my_slab_alloc(size)` | `my_slab.c` |
-| `kmem_cache_free()` | `my_slab_free(ptr)` | `my_slab.c` |
-| `kmalloc(size, GFP_KERNEL)` | `my_kmalloc(size)` | `my_alloc.c` |
-| `kfree(ptr)` | `my_kfree(ptr)` | `my_alloc.c` |
-| `kzalloc()` | `my_calloc(1, size)` | `my_alloc.c` |
-| `krealloc()` | `my_realloc(ptr, size)` | `my_alloc.c` |
-| `struct mm_struct` / VMAs | (not implemented) | — |
-| `pgd_t`, `pmd_t`, `pte_t` | `my_page_dir_t`, `my_page_table_t` | `my_paging.c` |
-| CR3 register | `my_page_dir_t *pgd` variable | `my_paging.c` |
-| MMU hardware page walk | `my_page_walk()` in software | `my_paging.c` |
-| Page fault handler | `my_page_walk()` prints "fault" | `my_paging.c` |
-
-### 18.2 Key Formulas
-
-```
-Buddy formula:       buddy_idx = page_idx ^ (1 << order)
-Page-align a ptr:    page_base = (uintptr_t)ptr & ~(PAGE_SIZE - 1)
-Page index from ptr: page_idx  = ((uintptr_t)ptr - base) / PAGE_SIZE
-Bitmap byte:         byte      = page_idx / 8
-Bitmap bit:          bit       = page_idx % 8
-PD index from VA:    pd_idx    = (va >> 22) & 0x3FF
-PT index from VA:    pt_idx    = (va >> 12) & 0x3FF
-Page offset from VA: offset    = va & 0xFFF
-Physical address:    pa        = (pte & ~0xFFF) | offset
-```
-
-### 18.3 Sizes and Limits
-
-```
-PAGE_SIZE                = 4096 bytes = 4 KB
-MAX_ORDER                = 10 (blocks of 1 to 1024 pages)
-Largest buddy block      = 2^10 pages = 4 MB
-PageForge arena          = 1024 pages = 4 MB
-Slab size classes        = 8, 16, 32, 64, 128, 256, 512, 1024 bytes
-LARGE_THRESHOLD          = 1024 bytes (above this: buddy, not slab)
-PD_SIZE                  = 1024 entries
-PT_SIZE                  = 1024 entries
-Max VA coverage          = 1024 × 1024 × 4 KB = 4 GB (32-bit full space)
-struct page size (Linux) ≈ 40 bytes
-mem_map for 4 GB @ 4KB pages = 40 × 262,144 = 10 MB
-```
-
-### 18.4 Error Detection in PageForge
-
-| Magic Number | Value | Purpose |
-|-------------|-------|---------|
-| `SLAB_MAGIC` | `0x51AB1234` | Validates slab headers on free |
-| `ALLOC_MAGIC` | `0xA110C8ED` | Validates kmalloc headers on free |
-| Poison value | `0xDEADDEAD` | Written to freed user data |
-
-If you pass a wrong pointer to `my_kfree()` or `my_slab_free()`, the magic
-number check will catch it and call `my_panic()` instead of silently corrupting
-memory.
-
----
-
-## 19. Glossary
-
-| Term | Definition |
-|------|-----------|
-| **Arena** | A large contiguous region of raw memory given to an allocator to manage. PageForge gets a 4 MB arena via `my_mmap()`. |
-| **Buddy** | A partner block of the same size that can be merged with a freed block. Two buddies together form a block at the next order. |
-| **Cache (slab)** | A slab allocator cache manages objects of one specific size. Example: `task_struct_cachep` in Linux, `g_slab_caches[i]` in PageForge. |
-| **Coalescing** | Merging a freed block with its free buddy to form a larger block. Reduces fragmentation. |
-| **CR3** | x86 control register that holds the physical address of the Page Global Directory. Loaded on every context switch. |
-| **DMA** | Direct Memory Access — hardware that transfers data between devices and memory without CPU involvement. Requires physically contiguous pages. |
-| **Embedded free list** | A free list where the "next" pointer lives inside the free object's own memory (no separate node allocation needed). Used in slab allocator. |
-| **GFP flags** | "Get Free Page" flags passed to kernel allocation functions. Control whether the allocator can sleep, do I/O, and which zone to allocate from. |
-| **High memory** | Physical RAM above 896 MB on 32-bit x86. Not permanently mapped into the kernel's virtual address space. |
-| **Intrusive list** | A linked list where the `next` pointer is embedded in the data structure itself (no wrapper node). Used extensively in Linux kernel. |
-| **kmalloc** | The kernel's general-purpose byte-level allocator. Uses the slab layer for small allocations. |
-| **kswapd** | Kernel swap daemon. Wakes when memory is low (below `low` watermark) and reclaims pages by swapping or dropping page cache. |
-| **MMU** | Memory Management Unit. Hardware that translates virtual addresses to physical addresses using page tables. |
-| **Order** | Buddy allocator size unit. Order N = 2^N pages = 2^N × 4 KB. |
-| **Page** | The basic unit of memory management. Usually 4 KB. Both hardware (MMU) and software (kernel) work with page-granularity. |
-| **Page fault** | Exception raised by the MMU when accessing a page whose Present bit is 0. Handled by the kernel to load the page from disk or signal the process. |
-| **Page frame** | A physical page — a 4 KB chunk of actual RAM. Distinguished from "page" which can mean virtual or physical. |
-| **PDE** | Page Directory Entry. One entry in the Page Directory. Points to a Page Table. |
-| **PGD** | Page Global Directory — the top-level page table structure. On x86-32, this is the only level above PTE. On x86-64, it's the first of four levels. |
-| **PTE** | Page Table Entry. One entry in a Page Table. Contains the physical page number + flags (Present, Write, User, etc.). |
-| **Slab** | A contiguous range of pages (usually one page) carved into fixed-size objects. Each object is tracked in an embedded free list. |
-| **Splitting** | Dividing a larger buddy block into two smaller ones to satisfy an allocation request. Opposite of coalescing. |
-| **struct page** | The kernel's per-page descriptor. One instance for every physical page in the system. Stored in `mem_map[]` array. |
-| **TLB** | Translation Lookaside Buffer. A cache of recent VA→PA translations inside the MMU. A TLB miss causes a page table walk. |
-| **VMA** | Virtual Memory Area (`struct vm_area_struct`). A contiguous region of a process's virtual address space with uniform permissions and backing. |
-| **vmalloc** | Kernel allocator for large regions. Pages are virtually contiguous but NOT physically contiguous. Used for loading kernel modules. |
-| **ZONE_DMA** | Memory zone covering 0–16 MB on x86-32. Required for ISA DMA devices. |
-| **ZONE_HIGHMEM** | Memory zone above 896 MB on 32-bit x86. Not permanently mapped into the kernel. |
-| **ZONE_NORMAL** | Memory zone from 16 MB to 896 MB on x86-32. Normally mapped, preferred for most kernel allocations. |
-
----
-
-## Appendix A: File-by-File Code Summary
-
-### my_types.h — Zero-dependency types
-
-Defines all integer types from scratch. No standard headers. This is the
-foundation everything else builds on.
-
-### my_syscall.h / my_syscall.c — OS interface
-
-The **only** files allowed to include `<sys/mman.h>` and `<unistd.h>`.
-Wraps `mmap()`, `munmap()`, `write()`, `_exit()`.
-
-**Pitfall fixed**: GCC has a `warn_unused_result` attribute on `write()`.
-The fix: `long _r = write(fd, buf, len); (void)_r;`
-
-### my_io.h / my_io.c — printf from scratch
-
-Implements `my_printf` using `__builtin_va_list` (GCC intrinsic, no `<stdarg.h>`).
-
-**Limitation**: Does not support width/precision specifiers (`%8d`, `%-4s`).
-This is intentional simplification — adding them would make the format parser
-much more complex without adding educational value.
-
-### my_paging.h / my_paging.c — Page table simulation
-
-2-level page table, pure software. 10-bit PD index, 10-bit PT index, 12-bit
-offset. Demonstrates every step the hardware MMU performs.
-
-### my_buddy.h / my_buddy.c — Buddy page allocator
-
-One global `my_buddy_t g_buddy`. Uses XOR formula for buddy finding.
-Bitmap for allocation tracking. Embedded next pointer in free blocks.
-
-### my_slab.h / my_slab.c — Slab object cache
-
-8 size classes (8–1024 bytes). Slab header at page-aligned start.
-Embedded free list. Three lists per cache (partial/full/empty).
-Magic number validates frees.
-
-### my_alloc.h / my_alloc.c — kmalloc level
-
-Hidden header before returned pointer. Routes to slab (≤ 1024 bytes) or
-buddy (> 1024 bytes). Poisons freed memory. Implements calloc and realloc.
-
-### main.c — The demo
-
-Five phases demonstrating each layer in order, with dumps showing the internal
-state at each step.
-
----
-
-## Appendix B: Common Bugs and How to Detect Them
-
-### Double Free
-
-```
-my_kfree(ptr);
-my_kfree(ptr);  // BUG: magic was cleared on first free
-```
-
-Detection: `hdr->magic != ALLOC_MAGIC` → `my_panic()` fires.
-In Linux: `SLAB_POISON` fills freed objects; if the poison is wrong on re-use,
-something wrote to freed memory.
-
-### Wrong Pointer to Free
-
-```
-char buf[100];
-my_kfree(buf);  // BUG: buf was not allocated by my_kmalloc
-```
-
-Detection: magic number at `buf - sizeof(header)` will not be `ALLOC_MAGIC`.
-
-### Use After Free
-
-```
-int *p = my_kmalloc(sizeof(int));
-my_kfree(p);
-*p = 42;   // BUG: p points to freed memory
-```
-
-Detection: The memory was poisoned with `0xDEADDEAD` on free. Reading it gives
-a tell-tale garbage value. In Linux: `SLAB_POISON = 0xa5a5a5a5`.
-
-### Buffer Overflow
-
-```
-char *buf = my_kmalloc(8);
-buf[8] = 'x';   // BUG: writes one byte past the end
-```
-
-This is not detected by PageForge. In Linux: `SLAB_RED_ZONE` places known
-patterns before and after the object and checks them on free.
-
----
-
-## Appendix C: How the Real Linux Kernel Differs
-
-PageForge deliberately simplifies many things. Here's what the real kernel adds:
-
-| Feature | Linux | PageForge |
-|---------|-------|-----------|
-| Multiple memory zones | ZONE_DMA, ZONE_NORMAL, ZONE_HIGHMEM | Single flat arena |
-| NUMA support | Per-node buddy allocator, NUMA-aware slab | None |
-| SMP/multi-core | Per-CPU free lists in slab (magazine layer) | None (single-threaded) |
-| GFP flags | ~15 flags controlling behavior | None |
-| Vmalloc | Virtually contiguous large allocs | None |
-| Page reclaim | kswapd, shrinkers, LRU lists | None |
-| Memory compaction | Defragment physical memory | None |
-| Huge pages | 2 MB / 1 GB pages via huge page support | None |
-| slab vs slub vs slob | Three allocator implementations, selectable | One simplified implementation |
-| Page cache | Cache file data in page-sized chunks | None |
-| Memory-mapped files | `mmap()` system call backed by files | Only anonymous mmap |
-| Copy-on-write | Fork optimization | None |
-| Demand paging | Load pages only on first access | None |
-| Swap | Write pages to disk when RAM is full | None |
-
-Despite all these simplifications, PageForge gets the fundamental algorithms
-right: buddy coalescing, slab embedded free lists, and two-level page table walks
-are all implemented faithfully.
-
----
-
 *This document was written alongside the PageForge implementation.*
-*Primary reference: Robert Love, Linux Kernel Development, 3rd Edition.*
-*Chapter 12: Memory Management (p.231–260)*
-*Chapter 15: The Process Address Space (p.305–323)*
