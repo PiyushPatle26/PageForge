@@ -367,7 +367,9 @@ array, why every table holds exactly 512 entries, an address split up by hand,
 why the PPN shift is 10 when the page shift is 12, how hardware tells a pointer
 entry from a leaf, where 2 MB pages come from when there is no size bit, and what
 `satp` and `sfence.vma` do. It ends with every function in `my_paging.c` in one
-line each, and ten questions to check yourself against.
+line each, and ten questions to check yourself against. It also disassembles the
+walk, so you can see the shifts and masks as the RISC-V instructions they compile
+to rather than taking the word "RISC-V" on trust.
 
 [`docs/MEMORY_MANAGEMENT.md`](docs/MEMORY_MANAGEMENT.md) is the long one:
 

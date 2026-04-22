@@ -475,7 +475,87 @@ it matches the hardware you have just been reading about. `mm_struct`,
 
 ---
 
-## 10. Every function in the file
+## 10. What this actually compiles to
+
+A fair question about this project is how it is RISC-V at all, given there is
+not a line of assembly in it. The answer is that the compiler writes the
+assembly, and it is worth looking at once, because the walk maps onto RISC-V
+instructions almost one to one.
+
+The binary is not x86 pretending:
+
+```
+$ file ./pageforge
+ELF 64-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked
+```
+
+Here is `my_virt_to_phys()` disassembled, with `a1` holding the virtual
+address. I have annotated it, nothing else is changed:
+
+```asm
+srli  a5,a1,0x26        # vaddr >> 38, the canonical check
+beqz  a5,ok             # top bits all zero, fine
+lui   a4,0x4000
+addi  a4,a4,-1          # 0x3FFFFFF, which is ~0UL >> 38
+beq   a5,a4,ok          # top bits all ones, also fine
+li    a0,0
+ret                     # anything else, return 0: non-canonical
+
+ok:
+srli  a5,a1,0x1e        # >> 30    VPN[2]
+andi  a5,a5,511         # & 0x1FF  the 9-bit mask
+slli  a5,a5,0x3         # * 8      entries are 8 bytes
+add   a4,a0,a5          # &table->entries[idx]
+ld    a5,0(a4)          # read the entry
+andi  a0,a5,1           # & PTE_V
+beqz  a0,fault          # not valid, stop
+andi  a3,a5,14          # & (PTE_R|PTE_W|PTE_X), 14 is 0b1110
+bnez  a3,leaf           # any permission bit set, this is a leaf
+
+lui   a3,0x1            # 4096, the offset of child[] inside the struct
+add   a4,a4,a3
+ld    a4,0(a4)          # table = table->child[idx]
+
+srli  a5,a1,0x15        # >> 21    VPN[1], same sequence again
+andi  a5,a5,511
+slli  a5,a5,0x3
+...
+srli  a5,a1,0xc         # >> 12    VPN[0], and once more
+andi  a5,a5,511
+```
+
+Read the shift amounts in decimal and the whole thing falls out: `0x26` is
+38, `0x1e` is 30, `0x15` is 21, `0xc` is 12. Those are exactly
+`SV39_VA_BITS - 1`, `VPN2_SHIFT`, `VPN1_SHIFT` and `VPN0_SHIFT` from
+`my_paging.h`. The three-level walk is three copies of
+`srli` / `andi 511` / `slli 3` / `ld`.
+
+A few details worth spotting:
+
+- `andi a5,a5,511` is the 9-bit mask, and 511 is `0x1FF`.
+- `slli a5,a5,0x3` multiplies the index by 8, because each entry is a 64-bit
+  value. The compiler turned the array subscript into a shift.
+- `andi a3,a5,14` is the leaf test. 14 is `0b1110`, which is R, W and X
+  together, so a single instruction answers pointer-or-leaf.
+- `lui a3,0x1` loads 4096, the byte offset from `entries[]` to `child[]` in
+  `my_ptable_t`. 512 entries at 8 bytes each is exactly one page, which is
+  the geometry from section 2 showing up in the machine code.
+
+So: the arithmetic is RISC-V arithmetic, running on a RISC-V instruction set,
+in an ELF marked `UCB RISC-V`. What the project does *not* do is execute
+privileged instructions, because it cannot. `csrw satp` and `sfence.vma` need
+supervisor mode, and this is a normal user process. That boundary is section 8.
+
+You can look at any of this yourself:
+
+```bash
+make
+riscv64-linux-gnu-objdump -d --no-show-raw-insn pageforge | less
+```
+
+---
+
+## 11. Every function in the file
 
 If I cannot say what one of these does in a sentence, I go and read it again.
 
@@ -504,7 +584,7 @@ doing the walk are the same walk and I was not going to write it twice.
 
 ---
 
-## 11. Where my model stops matching the hardware
+## 12. Where my model stops matching the hardware
 
 Look at the table structure:
 
@@ -530,7 +610,7 @@ page is mapped, where real hardware sets them on first use.
 
 ---
 
-## 12. The short version
+## 13. The short version
 
 If I only get one question about this project:
 
