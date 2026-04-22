@@ -1,26 +1,29 @@
-# ── PageForge — Reproducible build & test environment ─────────────────────────
-# Matches the GitHub Actions CI exactly.
+# ---- PageForge, reproducible RISC-V build and test environment --------------
+# Same steps as the GitHub Actions CI.
 # Usage:
 #   docker build -t pageforge-dev .
-#   docker run --rm pageforge-dev          # build + test
+#   docker run --rm pageforge-dev          # cross-build for rv64 + test on QEMU
 #   docker run --rm -it pageforge-dev bash # interactive shell
-# ──────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 FROM ubuntu:22.04
 
 LABEL maintainer="PageForge"
-LABEL description="Build and test environment for PageForge Linux MM simulator"
+LABEL description="RISC-V build and test environment for PageForge Linux MM simulator"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install all required tools
+# The rv64 cross toolchain plus QEMU user-mode. Native gcc and valgrind stay
+# for the ARCH=host build, because valgrind has no riscv64 target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
+    gcc-riscv64-linux-gnu \
     make \
     valgrind \
     qemu-user \
     qemu-user-static \
+    file \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,18 +32,25 @@ WORKDIR /app
 # Copy the whole project
 COPY . .
 
-# Default: build everything, run tests, run demo
+# Cross-build for rv64, run it all under QEMU, then leak-check the native
+# build, since valgrind cannot instrument riscv64 binaries.
 CMD ["bash", "-c", "\
-    echo '=== Building PageForge ===' && \
+    echo '=== Building PageForge for riscv64 ===' && \
     make clean && \
     make && \
+    file ./pageforge && \
     echo '' && \
-    echo '=== Running Unit Tests (Unity) ===' && \
+    echo '=== Running Unity Tests under qemu-riscv64 ===' && \
     make test && \
     echo '' && \
-    echo '=== Running Demo ===' && \
+    echo '=== Running Demo under qemu-riscv64 ===' && \
     make demo && \
     echo '' && \
-    echo '=== Running under QEMU user-mode ===' && \
-    qemu-x86_64-static ./pageforge \
+    echo '=== Running main binary under qemu-riscv64 ===' && \
+    make run && \
+    echo '' && \
+    echo '=== Native build + valgrind (host arch) ===' && \
+    make clean && \
+    make ARCH=host demo && \
+    valgrind --error-exitcode=1 --leak-check=full ./demo/pageforge_demo \
 "]

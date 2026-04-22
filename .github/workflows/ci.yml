@@ -8,31 +8,37 @@ on:
 
 jobs:
   build-and-test:
-    name: Build, Test & QEMU
+    name: Build (rv64), Test and QEMU
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install RISC-V toolchain and QEMU
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential gcc make valgrind \
-            qemu-user qemu-user-static
+            build-essential gcc gcc-riscv64-linux-gnu make valgrind \
+            qemu-user qemu-user-static file
 
-      - name: Build main binary (static)
+      - name: Build main binary (riscv64, static)
         run: make clean && make
 
-      - name: Run Unity unit tests (32 tests)
+      - name: Confirm the binary is RISC-V
+        run: file ./pageforge | grep -q "RISC-V" && file ./pageforge
+
+      - name: Run Unity unit tests under qemu-riscv64
         run: make test
 
-      - name: Run standalone demo
+      - name: Run standalone demo under qemu-riscv64
         run: make demo
 
-      - name: Run under QEMU user-mode
-        run: qemu-x86_64-static ./pageforge
+      - name: Run main binary under qemu-riscv64
+        run: make run
 
-      - name: Valgrind memory check (demo)
+      - name: Native build (host arch) for valgrind
+        run: make clean && make ARCH=host demo
+
+      - name: Valgrind memory check (demo, host arch)
         run: valgrind --error-exitcode=1 --leak-check=full ./demo/pageforge_demo
