@@ -1,18 +1,23 @@
 /*
- * main.c — PageForge demonstration.
+ * main.c: the PageForge walkthrough.
  *
- * Walks through all four layers of memory management in order,
- * exactly mirroring how the Linux kernel's MM subsystem is layered:
+ * Runs through the four layers of memory management in order, which is the
+ * same order the Linux MM subsystem stacks them:
  *
  *   Layer 1: Raw memory from OS  (my_mmap)
  *   Layer 2: Page allocator      (my_buddy)
  *   Layer 3: Object caches       (my_slab)
  *   Layer 4: General allocator   (my_kmalloc / my_kfree / my_calloc / my_realloc)
  *
- * Plus a software simulation of page-table walks (my_paging).
+ * Plus a software version of the RISC-V Sv39 page table walk (my_paging).
  *
  * No #include <stdio.h>, no #include <stdlib.h>.
- * The only OS calls made are mmap(), write(), and exit() — all via my_syscall.
+ * The only OS calls are mmap(), write() and exit(), all through my_syscall.
+ *
+ * This file is a driver, not a layer. Nothing here is part of the allocator,
+ * it just calls into each layer in turn and prints what happened, so you can
+ * watch the thing work. Start with demo_paging() if you are here for the
+ * page tables.
  */
 
 #include "my_types.h"
@@ -35,13 +40,13 @@ static void section(const char *title)
 /* ------------------------------------------------------------------ */
 static void demo_raw_memory(void)
 {
-    section("Phase 0 — Raw memory from OS  (my_mmap)");
+    section("Phase 0: Raw memory from OS  (my_mmap)");
     my_puts("  The OS hands us a blank region of pages. This is the");
-    my_puts("  equivalent of the kernel's boot memory map — raw RAM.");
+    my_puts("  same idea as the kernel's boot memory map. Raw RAM.");
 
     void *p = my_mmap(PAGE_SIZE * 4);   /* ask for 4 pages = 16 KB */
     my_printf("  my_mmap(16 KB)  → %p\n", p);
-    my_puts("  (zeroed anonymous pages — no file backing, no libc)");
+    my_puts("  (zeroed anonymous pages, no file backing, no libc)");
 
     /* Write something into it to prove it is usable */
     uint8_t *bytes = (uint8_t *)p;
@@ -57,35 +62,74 @@ static void demo_raw_memory(void)
 /* ------------------------------------------------------------------ */
 /* Phase 1: paging simulation                                          */
 /* ------------------------------------------------------------------ */
+/*
+ * Try one access and report what hardware would have done. A page can
+ * translate perfectly and still fault, if the leaf does not carry the bit
+ * this particular access needs.
+ */
+static void try_access(my_page_dir_t *pgd, uint64_t va,
+                       my_access_t type, int mode, const char *what)
+{
+    my_access_result_t r = my_access(pgd, va, type, mode);
+
+    if (r.fault == MY_FAULT_NONE) {
+        my_printf("    %-30s allowed   -> PA 0x%lx\n", what, r.paddr);
+    } else {
+        unsigned scause = 0;
+        const char *cause = my_fault_cause(type, &scause);
+        my_printf("    %-30s FAULT     %s (scause %u, %s)\n",
+                  what, my_fault_name(r.fault), scause, cause);
+    }
+}
+
 static void demo_paging(void)
 {
-    section("Phase 1 — Page Table Simulation  (my_paging)");
-    my_puts("  We build a 2-level page table (like x86-32) in software.");
-    my_puts("  Real Linux does this in hardware via CR3 / MMU.");
-    my_puts("  Each my_page_walk() call shows the exact steps the CPU takes.\n");
+    section("Phase 1: Page Table Simulation  (my_paging, RISC-V Sv39)");
+    my_puts("  A 3-level Sv39 page table, built in software: PGD -> PMD -> PTE.");
+    my_puts("  On real rv64 hardware the MMU does this, with satp holding the root.");
+    my_puts("  Every my_page_walk() below shows the steps it would take.\n");
 
     my_page_dir_t *pgd = my_pgd_create();
 
     /*
-     * Map three virtual pages to arbitrary "physical" frames.
-     * In a real kernel these physical frames come from the page allocator.
+     * Map three virtual pages onto made-up "physical" frames. In a real
+     * kernel those frames would come from the page allocator.
+     *
+     * Watch the permission bits: a leaf entry needs at least one of R, W
+     * or X to count as a mapping at all, and U is what makes a page
+     * reachable from user mode.
      */
-    my_map_page(pgd, 0x00001000, 0x00100000, PTE_WRITE);           /* code page  */
-    my_map_page(pgd, 0x00002000, 0x00200000, PTE_WRITE | PTE_USER);/* data page  */
-    my_map_page(pgd, 0x00401000, 0x00300000, PTE_WRITE);           /* stack page */
+    my_map_page(pgd, 0x00001000, 0x80100000, PTE_R | PTE_X);           /* code page  */
+    my_map_page(pgd, 0x00002000, 0x80200000, PTE_R | PTE_W | PTE_U);   /* data page  */
+    my_map_page(pgd, 0x40201000, 0x80300000, PTE_R | PTE_W);           /* stack page */
 
     my_puts("  Mapped:");
-    my_puts("    VA 0x00001000  →  PA 0x00100000  (kernel code)");
-    my_puts("    VA 0x00002000  →  PA 0x00200000  (user data)");
-    my_puts("    VA 0x00401000  →  PA 0x00300000  (stack)");
-    my_puts("    VA 0x00005000  →  (not mapped — expect page fault)\n");
+    my_puts("    VA 0x00001000  ->  PA 0x80100000  (kernel code, R-X)");
+    my_puts("    VA 0x00002000  ->  PA 0x80200000  (user data,  RW-U)");
+    my_puts("    VA 0x40201000  ->  PA 0x80300000  (stack, different PGD entry)");
+    my_puts("    VA 0x00005000  ->  (not mapped, so expect a page fault)\n");
 
-    my_page_walk(pgd, 0x00001ABC);  /* within mapped code page  */
-    my_page_walk(pgd, 0x00002080);  /* within mapped data page  */
-    my_page_walk(pgd, 0x00005000);  /* not mapped → page fault  */
+    my_page_walk(pgd, 0x00001ABC);  /* inside the code page      */
+    my_page_walk(pgd, 0x00002080);  /* inside the data page      */
+    my_page_walk(pgd, 0x40201004);  /* way up the address space  */
+    my_page_walk(pgd, 0x00005000);  /* nothing here, so it faults */
 
-    uint32_t pa = my_virt_to_phys(pgd, 0x00001ABC);
-    my_printf("  my_virt_to_phys(0x00001ABC) = 0x%x\n", pa);
+    uint64_t pa = my_virt_to_phys(pgd, 0x00001ABC);
+    my_printf("  my_virt_to_phys(0x00001ABC) = 0x%lx\n", pa);
+
+    /*
+     * Translating an address and being allowed to touch it are two
+     * different questions. my_virt_to_phys() answers the first one.
+     * my_access() answers the second, which is what hardware actually
+     * enforces on every load, store and instruction fetch.
+     */
+    my_puts("\n  Permission checks (same pages, different access types):\n");
+    try_access(pgd, 0x00001ABC, MY_ACCESS_READ,  MY_MODE_SUPERVISOR, "code page R-X, read");
+    try_access(pgd, 0x00001ABC, MY_ACCESS_EXEC,  MY_MODE_SUPERVISOR, "code page R-X, execute");
+    try_access(pgd, 0x00001ABC, MY_ACCESS_WRITE, MY_MODE_SUPERVISOR, "code page R-X, write");
+    try_access(pgd, 0x00002080, MY_ACCESS_WRITE, MY_MODE_USER,       "data page RW-U, user write");
+    try_access(pgd, 0x00002080, MY_ACCESS_EXEC,  MY_MODE_USER,       "data page RW-U, user exec");
+    try_access(pgd, 0x40201004, MY_ACCESS_READ,  MY_MODE_USER,       "stack page RW, user read");
 }
 
 /* ------------------------------------------------------------------ */
@@ -93,7 +137,7 @@ static void demo_paging(void)
 /* ------------------------------------------------------------------ */
 static void demo_buddy(void)
 {
-    section("Phase 2 — Buddy Page Allocator  (my_buddy)");
+    section("Phase 2: Buddy Page Allocator  (my_buddy)");
     my_puts("  We get a 4 MB arena from the OS (one my_mmap call).");
     my_puts("  The buddy allocator manages it as 1024 x 4 KB pages.");
     my_puts("  Allocate in power-of-2 sizes; free coalesces buddies.\n");
@@ -120,7 +164,7 @@ static void demo_buddy(void)
 
     my_buddy_dump();
 
-    my_puts("  [free]  freeing all three blocks — expect coalescing");
+    my_puts("  [free]  freeing all three blocks, watch them coalesce");
     my_free_pages(a, 0);
     my_free_pages(b, 1);
     my_free_pages(c, 3);
@@ -133,9 +177,9 @@ static void demo_buddy(void)
 /* ------------------------------------------------------------------ */
 static void demo_slab(void)
 {
-    section("Phase 3 — Slab Allocator  (my_slab)");
+    section("Phase 3: Slab Allocator  (my_slab)");
     my_puts("  Slab takes pages from buddy and carves them into");
-    my_puts("  fixed-size objects — exactly like Linux's SLUB/SLAB.\n");
+    my_puts("  fixed-size objects, the same way Linux SLUB does.\n");
 
     /* my_slab_init() was called inside my_alloc_init() in Phase 4 */
 
@@ -166,8 +210,8 @@ static void demo_slab(void)
 /* ------------------------------------------------------------------ */
 static void demo_alloc(void)
 {
-    section("Phase 4 — General Allocator  (my_kmalloc / my_kfree / ...)");
-    my_puts("  This is the public API — equivalent to kmalloc() in Linux");
+    section("Phase 4: General Allocator  (my_kmalloc / my_kfree / ...)");
+    my_puts("  This is the public API, the same job kmalloc() does in Linux");
     my_puts("  or malloc() in user-space.\n");
 
     /* --- my_kmalloc --- */
@@ -225,13 +269,13 @@ int main(void)
     my_puts(" ██╔═══╝ ██╔══██║██║   ██║██╔══╝  ");
     my_puts(" ██║     ██║  ██║╚██████╔╝███████╗");
     my_puts(" ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝");
-    my_puts("  F O R G E  —  Linux MM from scratch\n");
+    my_puts("  F O R G E  |  Linux MM from scratch\n");
     my_puts("  No libc. No malloc. No printf.");
     my_puts("  Only mmap() + write() from the OS.\n");
 
     demo_raw_memory();
     demo_paging();
-    demo_buddy();   /* phase 2 — buddy gets its own arena                    */
+    demo_buddy();   /* phase 2, buddy gets its own arena                     */
 
     /*
      * Phases 3 and 4 share state (buddy allocator + slab caches).

@@ -2,7 +2,7 @@
 #define MY_ALLOC_H
 
 /*
- * my_alloc.h — general-purpose allocator (the public API).
+ * my_alloc.h: the general-purpose allocator, which is the public API.
  *
  * This is the equivalent of kmalloc/kfree in the Linux kernel,
  * or malloc/free in user-space libc.
@@ -27,7 +27,7 @@
 #define LARGE_THRESHOLD   1024u
 
 typedef struct {
-    uint32_t magic;     /* ALLOC_MAGIC — for double-free / corruption check */
+    uint32_t magic;     /* ALLOC_MAGIC, catches double frees and corruption */
     size_t   size;      /* requested size (not including this header)        */
     uint32_t is_large;  /* 1 = came from buddy directly, 0 = came from slab  */
     uint32_t order;     /* buddy order (only valid when is_large == 1)       */

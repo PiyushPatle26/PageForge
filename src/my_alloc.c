@@ -1,5 +1,5 @@
 /*
- * my_alloc.c — general-purpose allocator (my_kmalloc and friends).
+ * my_alloc.c: the general-purpose allocator, my_kmalloc and friends.
  *
  * This is the top layer, equivalent to Linux's kmalloc() / kfree().
  *
@@ -9,6 +9,13 @@
  *
  * A small header is hidden just before every returned pointer.
  * This is the same trick glibc's malloc uses (chunk headers).
+ *
+ * Where this sits: layer 4, the top. Everything below it is invisible to
+ * whoever calls my_kmalloc(), which is the point of having layers.
+ *
+ * If you read one function here, read my_realloc(). It shows why the hidden
+ * header has to exist: without knowing the old size, you cannot copy the
+ * old data into the new block.
  */
 
 #include "my_alloc.h"
@@ -74,7 +81,7 @@ void my_kfree(void *ptr)
     my_alloc_header_t *hdr = (my_alloc_header_t *)ptr - 1;
 
     if (hdr->magic != ALLOC_MAGIC)
-        my_panic("my_kfree: bad magic — double free or corrupt pointer");
+        my_panic("my_kfree: bad magic, double free or corrupt pointer");
 
     hdr->magic = 0xDEADDEADu;   /* poison freed memory */
 
@@ -92,7 +99,7 @@ void *my_calloc(size_t nmemb, size_t size)
     void  *ptr   = my_kmalloc(total);
     if (!ptr) return NULL;
 
-    /* Zero the memory — no memset from libc */
+    /* Zero it by hand, since there is no memset from libc */
     uint8_t *p = (uint8_t *)ptr;
     for (size_t i = 0; i < total; i++)
         p[i] = 0;
@@ -114,7 +121,7 @@ void *my_realloc(void *ptr, size_t new_size)
     /*
      * Optimisation: if the new size still fits in the same slab class
      * (or the same page order for large allocs), just update the size
-     * in place — no copy needed.
+     * in place, so there is nothing to copy.
      */
     if (!hdr->is_large && new_size <= LARGE_THRESHOLD) {
         size_t old_needed = old_size + sizeof(my_alloc_header_t);
