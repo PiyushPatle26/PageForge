@@ -477,12 +477,12 @@ it matches the hardware you have just been reading about. `mm_struct`,
 
 ## 10. What this actually compiles to
 
-A fair question about this project is how it is RISC-V at all, given there is
-not a line of assembly in it. The answer is that the compiler writes the
-assembly, and it is worth looking at once, because the walk maps onto RISC-V
+A fair question about this project is how it is RISC-V at all, given that
+almost all of it is C. The answer is that the compiler writes the assembly,
+and it is worth looking at once, because the walk maps onto RISC-V
 instructions almost one to one.
 
-The binary is not x86 pretending:
+The binary really is rv64:
 
 ```
 $ file ./pageforge

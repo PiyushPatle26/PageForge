@@ -13,8 +13,7 @@ LABEL description="RISC-V build and test environment for PageForge Linux MM simu
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The rv64 cross toolchain plus QEMU user-mode. Native gcc and valgrind stay
-# for the ARCH=host build, because valgrind has no riscv64 target.
+# The rv64 cross toolchain plus QEMU user-mode. riscv64 is the only target.
 #
 # libc6-dev-riscv64-cross is listed on purpose. gcc-riscv64-linux-gnu only
 # Recommends it, and --no-install-recommends means we would not get it, so
@@ -26,7 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-riscv64-linux-gnu \
     libc6-dev-riscv64-cross \
     make \
-    valgrind \
     qemu-user \
     qemu-user-static \
     file \
@@ -39,7 +37,6 @@ WORKDIR /app
 COPY . .
 
 # Cross-build for rv64, run it all under QEMU, then leak-check the native
-# build, since valgrind cannot instrument riscv64 binaries.
 CMD ["bash", "-c", "\
     echo '=== Building PageForge for riscv64 ===' && \
     make clean && \
@@ -55,8 +52,5 @@ CMD ["bash", "-c", "\
     echo '=== Running main binary under qemu-riscv64 ===' && \
     make run && \
     echo '' && \
-    echo '=== Native build + valgrind (host arch) ===' && \
     make clean && \
-    make ARCH=host demo && \
-    valgrind --error-exitcode=1 --leak-check=full ./demo/pageforge_demo \
 "]

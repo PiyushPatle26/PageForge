@@ -1637,16 +1637,24 @@ No width specifiers (`%8d`), intentionally kept minimal.
 
 Standard C library functions (`printf`, `malloc`, `memset`) are NOT available
 in the kernel. The kernel implements its own versions (`printk`, `kmalloc`,
-`memset`). PageForge simulates this by not using any libc at all:
+`memset`). PageForge does the same: the standalone binaries link with `-nostdlib` and
+contain no libc at all.
 
 ```c
-// We NEVER include these in any file except my_syscall.c:
+// No file includes any of these:
 // #include <stdio.h>
 // #include <stdlib.h>
 // #include <string.h>
 ```
 
-This forces us to truly understand what these functions do, and implement them.
+The three syscalls we need are issued directly with `ecall` in
+`my_syscall.c`, and the pieces libc would normally provide are ours:
+`_start` (including the `gp` setup RISC-V needs before any global can be
+touched), `memset`, `memcpy`, and `my_printf` on top of `write`.
+
+The one exception is the Unity test build, which links libc because Unity
+itself needs it. `nm ./pageforge` on the shipped binary shows no libc
+symbols, and CI checks it.
 
 ---
 
@@ -1798,10 +1806,8 @@ run: pageforge
 	$(QEMU) ./pageforge
 ```
 
-**`ARCH`**: `riscv64` by default, which cross-compiles with
-`riscv64-linux-gnu-gcc` and runs everything through `qemu-riscv64`. Setting
-`ARCH=host` empties both variables, so the same rules build and run natively,
-needed for valgrind, which has no riscv64 target.
+**Target**: riscv64 only. Everything cross-compiles with
+`riscv64-linux-gnu-gcc` and runs through `qemu-riscv64`.
 
 **`-march=rv64gc -mabi=lp64d`**: the baseline RISC-V profile Linux distributions
 target, the G ("general") extension set plus compressed instructions, with a

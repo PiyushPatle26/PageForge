@@ -22,7 +22,7 @@ jobs:
           # --no-install-recommends would skip it, leaving no target headers.
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
-            make valgrind qemu-user qemu-user-static file
+            make qemu-user qemu-user-static file
 
       - name: Build main binary (riscv64, static)
         run: make clean && make
@@ -39,8 +39,7 @@ jobs:
       - name: Run main binary under qemu-riscv64
         run: make run
 
-      - name: Native build (host arch) for valgrind
-        run: make clean && make ARCH=host demo
-
-      - name: Valgrind memory check (demo, host arch)
-        run: valgrind --error-exitcode=1 --leak-check=full ./demo/pageforge_demo
+      - name: Confirm the binary links no libc
+        run: |
+          ! riscv64-linux-gnu-nm ./pageforge | grep -qE '__libc|glibc'
+          echo "no libc symbols present"

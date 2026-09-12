@@ -7,7 +7,7 @@
 ![Language](https://img.shields.io/badge/Language-C%20%28C11%29-orange)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-The Linux kernel memory management stack, rebuilt from nothing in C. No libc, no stdlib. Every layer is written by hand: raw `mmap` syscalls, a buddy page allocator, a slab object cache, and a `kmalloc`/`kfree`/`calloc`/`realloc` general allocator on top. 49 tests keep it honest. It cross-compiles for riscv64 and runs under QEMU.
+The Linux kernel memory management stack, rebuilt from nothing in C. The standalone binaries link with `-nostdlib` and call no libc at all: the three syscalls they need are issued directly with `ecall`, and `_start`, `memset` and `memcpy` are ours. Every layer is written by hand: raw `mmap` syscalls, a buddy page allocator, a slab object cache, and a `kmalloc`/`kfree`/`calloc`/`realloc` general allocator on top. 49 tests keep it honest. It cross-compiles for riscv64 and runs under QEMU.
 
 I built it to understand how the kernel actually manages memory, by writing each layer instead of reading about it. It targets RISC-V, so the paging layer implements Sv39, the three-level page table format Linux boots with on 64-bit RISC-V hardware.
 
@@ -127,7 +127,7 @@ All 49 run as rv64 binaries under `qemu-riscv64`. Full log in
 PageForge/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml              # GitHub Actions: cross-build, test, QEMU, valgrind
+│       └── ci.yml              # GitHub Actions: cross-build, test, QEMU
 ├── .gitignore
 ├── Dockerfile                  # Ubuntu 22.04 with the rv64 cross toolchain
 ├── Makefile
@@ -157,7 +157,7 @@ PageForge/
 │   ├── my_slab.c               # Slab object cache
 │   └── my_syscall.c            # Raw mmap/munmap/write/exit syscalls
 └── tests/
-    ├── test_pageforge.c        # 39 Unity tests across all layers
+    ├── test_pageforge.c        # 49 Unity tests across all layers
     └── vendor/
         └── unity/              # Unity test framework (ThrowTheSwitch)
 ```
@@ -171,7 +171,6 @@ PageForge/
 | Language         | C (C11)                                  |
 | Build System     | GNU Make                                 |
 | Testing          | Unity (ThrowTheSwitch)                   |
-| Memory Debugging | Valgrind                                 |
 | Target Arch      | riscv64 (rv64gc, LP64D ABI)              |
 | Toolchain        | `riscv64-linux-gnu-gcc` (cross)          |
 | Emulation        | QEMU user-mode (`qemu-riscv64`)          |
@@ -188,7 +187,7 @@ PageForge/
 # Build the image
 docker build -t pageforge-dev .
 
-# Cross-build, test, demo and valgrind in one go (the default CMD)
+# Cross-build, test and demo in one go (the default CMD)
 docker run --rm pageforge-dev
 
 # Or poke around inside
@@ -199,7 +198,7 @@ docker run --rm -it pageforge-dev bash
 
 ```bash
 # You need the cross toolchain and QEMU user-mode
-sudo apt install build-essential gcc make valgrind \
+sudo apt install build-essential gcc make \
                  gcc-riscv64-linux-gnu qemu-user qemu-user-static
 
 # Cross-compile a static rv64 binary, which is the default
@@ -210,13 +209,10 @@ file ./pageforge      # ELF 64-bit LSB executable, UCB RISC-V
 make run
 
 # Or build for this machine instead.
-# Valgrind has no riscv64 target, so this is how you leak-check.
-make ARCH=host run
 ```
 
 `ARCH` works on every target. `make test`, `make demo` and `make run` all
 cross-compile for rv64 and go through `qemu-riscv64` by default, or build and
-run natively with `ARCH=host`.
 
 ---
 
@@ -388,15 +384,6 @@ to rather than taking the word "RISC-V" on trust.
 
 ---
 
-## Valgrind
-
-Valgrind cannot instrument riscv64 binaries, so leak-check the native build:
-
-```bash
-make ARCH=host demo
-valgrind --leak-check=full ./demo/pageforge_demo
-# 0 errors, 0 leaks
-```
 
 ---
 
